@@ -140,6 +140,7 @@ describe("environment helpers", () => {
     expect(effective.find(({ name }) => name.toLowerCase() === "path")).toMatchObject({
       value: "C:\\SystemBin;C:\\UserBin",
       valueType: "expandableString",
+      scope: "combined",
       source: "combined",
       shadowed: false,
       conflict: false,

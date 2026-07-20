@@ -47,11 +47,18 @@ export interface PathChangeSummary {
   orderChanged: boolean;
 }
 
-export interface EffectiveEnvironmentVariable extends EnvironmentVariable {
-  source: EnvironmentScope | "combined";
-  shadowed: boolean;
-  conflict: boolean;
-}
+export type EffectiveEnvironmentVariable =
+  | (EnvironmentVariable & {
+      source: EnvironmentScope;
+      shadowed: boolean;
+      conflict: boolean;
+    })
+  | (Omit<EnvironmentVariable, "scope"> & {
+      scope: "combined";
+      source: "combined";
+      shadowed: false;
+      conflict: false;
+    });
 
 export type VariableCopyFormat = "name" | "value" | "powershell";
 

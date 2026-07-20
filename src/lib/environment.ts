@@ -135,6 +135,7 @@ export function mergeEffectiveVariables(
           systemVariable.valueType === "expandableString"
             ? "expandableString"
             : "string",
+        scope: "combined",
         source: "combined",
         shadowed: false,
         conflict: false,

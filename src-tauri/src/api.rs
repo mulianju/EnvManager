@@ -168,10 +168,11 @@ pub fn apply_environment_import(
     request: ImportFileRequest,
     strategy: ImportConflictStrategy,
     expected_token: String,
+    expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
-        .apply_import(&request, strategy, &expected_token)
+        .apply_import(&request, strategy, &expected_token, &expected_revision)
         .map_err(ApiError::from)
 }
 
@@ -201,7 +202,8 @@ pub fn toggle_favorite(
 ) -> Result<Vec<FavoriteKey>, ApiError> {
     validate_variable_name(&favorite.name)
         .map_err(|error| ApiError::from(SettingsError::Validation(error)))?;
-    let snapshot = lock_service(&state)?.snapshot().map_err(ApiError::from)?;
+    let service = lock_service(&state)?;
+    let snapshot = service.snapshot().map_err(ApiError::from)?;
     let variables = match favorite.scope {
         EnvironmentScope::User => &snapshot.user_variables,
         EnvironmentScope::System => &snapshot.system_variables,
@@ -335,6 +337,7 @@ mod tests {
         };
         let preview = ImportPreview {
             token: "preview-token".to_owned(),
+            environment_revision: "preview-revision".to_owned(),
             items: Vec::new(),
         };
 
@@ -346,7 +349,11 @@ mod tests {
         assert!(mutation_json.get("undo_backup_ids").is_none());
         assert_eq!(
             serde_json::to_value(preview).unwrap(),
-            json!({ "token": "preview-token", "items": [] })
+            json!({
+                "token": "preview-token",
+                "environmentRevision": "preview-revision",
+                "items": []
+            })
         );
     }
 

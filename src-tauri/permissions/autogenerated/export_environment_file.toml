@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-export-environment-file"
+description = "Enables the export_environment_file command without any pre-configured scope."
+commands.allow = ["export_environment_file"]
+
+[[permission]]
+identifier = "deny-export-environment-file"
+description = "Denies the export_environment_file command without any pre-configured scope."
+commands.deny = ["export_environment_file"]

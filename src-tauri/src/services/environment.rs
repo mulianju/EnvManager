@@ -177,7 +177,9 @@ impl EnvironmentService {
         request: &ImportFileRequest,
     ) -> Result<ImportPreview, EnvironmentServiceError> {
         let variables = read_import_file(request)?;
-        self.build_import_preview(variables)
+        let user = self.store.list(EnvironmentScope::User)?;
+        let system = self.store.list(EnvironmentScope::System)?;
+        Ok(self.build_import_preview(variables, &user, &system))
     }
 
     pub fn apply_import(
@@ -185,6 +187,7 @@ impl EnvironmentService {
         request: &ImportFileRequest,
         strategy: ImportConflictStrategy,
         expected_token: &str,
+        expected_revision: &str,
     ) -> Result<MutationResult, EnvironmentServiceError> {
         let variables = read_import_file(request)?;
         if !is_valid_import_token(expected_token) || import_token(&variables) != expected_token {
@@ -195,7 +198,12 @@ impl EnvironmentService {
                 "Import file does not contain any variables.".to_owned(),
             ));
         }
-        let preview = self.build_import_preview(variables)?;
+        let user = self.store.list(EnvironmentScope::User)?;
+        let system = self.store.list(EnvironmentScope::System)?;
+        if environment_revision(&user, &system) != expected_revision {
+            return Err(EnvironmentServiceError::ImportPreviewChanged);
+        }
+        let preview = self.build_import_preview(variables, &user, &system);
         let writes = preview
             .items
             .into_iter()
@@ -513,30 +521,17 @@ impl EnvironmentService {
     fn build_import_preview(
         &self,
         variables: Vec<EnvironmentVariable>,
-    ) -> Result<ImportPreview, EnvironmentServiceError> {
+        user: &[EnvironmentVariable],
+        system: &[EnvironmentVariable],
+    ) -> ImportPreview {
         let token = import_token(&variables);
-        let needs_user = variables
-            .iter()
-            .any(|variable| variable.scope == EnvironmentScope::User);
-        let needs_system = variables
-            .iter()
-            .any(|variable| variable.scope == EnvironmentScope::System);
-        let user = if needs_user {
-            self.store.list(EnvironmentScope::User)?
-        } else {
-            Vec::new()
-        };
-        let system = if needs_system {
-            self.store.list(EnvironmentScope::System)?
-        } else {
-            Vec::new()
-        };
+        let environment_revision = environment_revision(user, system);
         let items = variables
             .into_iter()
             .map(|variable| {
                 let current = match variable.scope {
-                    EnvironmentScope::User => &user,
-                    EnvironmentScope::System => &system,
+                    EnvironmentScope::User => user,
+                    EnvironmentScope::System => system,
                 };
                 let existing = current
                     .iter()
@@ -559,7 +554,11 @@ impl EnvironmentService {
                 }
             })
             .collect();
-        Ok(ImportPreview { token, items })
+        ImportPreview {
+            token,
+            environment_revision,
+            items,
+        }
     }
 
     fn finalize_transaction(
@@ -1297,8 +1296,13 @@ mod tests {
         request: &ImportFileRequest,
         strategy: ImportConflictStrategy,
     ) -> Result<MutationResult, EnvironmentServiceError> {
-        let token = service.preview_import(request)?.token;
-        service.apply_import(request, strategy, &token)
+        let preview = service.preview_import(request)?;
+        service.apply_import(
+            request,
+            strategy,
+            &preview.token,
+            &preview.environment_revision,
+        )
     }
 
     #[test]
@@ -2738,6 +2742,7 @@ mod tests {
             &request,
             ImportConflictStrategy::Overwrite,
             &preview.token,
+            &preview.environment_revision,
         );
 
         assert!(matches!(
@@ -2753,7 +2758,12 @@ mod tests {
         let latest = harness.service.preview_import(&request).unwrap();
         let result = harness
             .service
-            .apply_import(&request, ImportConflictStrategy::Overwrite, &latest.token)
+            .apply_import(
+                &request,
+                ImportConflictStrategy::Overwrite,
+                &latest.token,
+                &latest.environment_revision,
+            )
             .unwrap();
 
         assert_variable(&result.snapshot, EnvironmentScope::User, "VALUE", "latest");
@@ -2802,6 +2812,7 @@ mod tests {
             &request,
             ImportConflictStrategy::Overwrite,
             &preview.token,
+            &preview.environment_revision,
         );
 
         let state = harness.state.lock().unwrap();
@@ -2829,11 +2840,15 @@ mod tests {
             file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::System));
 
         let non_hex_token = "g".repeat(64);
+        let revision = harness.service.revision().unwrap();
         for token in ["", "not-a-token", non_hex_token.as_str()] {
             assert!(matches!(
-                harness
-                    .service
-                    .apply_import(&request, ImportConflictStrategy::Overwrite, token,),
+                harness.service.apply_import(
+                    &request,
+                    ImportConflictStrategy::Overwrite,
+                    token,
+                    &revision,
+                ),
                 Err(EnvironmentServiceError::ImportPreviewChanged)
             ));
         }

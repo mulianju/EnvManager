@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-launch-powershell"
+description = "Enables the launch_powershell command without any pre-configured scope."
+commands.allow = ["launch_powershell"]
+
+[[permission]]
+identifier = "deny-launch-powershell"
+description = "Denies the launch_powershell command without any pre-configured scope."
+commands.deny = ["launch_powershell"]

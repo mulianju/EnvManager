@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-undo-environment-mutation"
+description = "Enables the undo_environment_mutation command without any pre-configured scope."
+commands.allow = ["undo_environment_mutation"]
+
+[[permission]]
+identifier = "deny-undo-environment-mutation"
+description = "Denies the undo_environment_mutation command without any pre-configured scope."
+commands.deny = ["undo_environment_mutation"]

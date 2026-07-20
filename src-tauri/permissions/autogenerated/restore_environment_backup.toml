@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-environment-backup"
+description = "Enables the restore_environment_backup command without any pre-configured scope."
+commands.allow = ["restore_environment_backup"]
+
+[[permission]]
+identifier = "deny-restore-environment-backup"
+description = "Denies the restore_environment_backup command without any pre-configured scope."
+commands.deny = ["restore_environment_backup"]

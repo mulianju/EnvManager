@@ -66,6 +66,7 @@ pub struct ImportPreviewItem {
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
     pub token: String,
+    pub environment_revision: String,
     pub items: Vec<ImportPreviewItem>,
 }
 

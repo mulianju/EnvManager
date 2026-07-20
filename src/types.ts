@@ -104,6 +104,7 @@ export interface ImportPreviewItem {
 
 export interface ImportPreview {
   token: string;
+  environmentRevision: string;
   items: ImportPreviewItem[];
 }
 

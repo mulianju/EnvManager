@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-environment-variable"
+description = "Enables the save_environment_variable command without any pre-configured scope."
+commands.allow = ["save_environment_variable"]
+
+[[permission]]
+identifier = "deny-save-environment-variable"
+description = "Denies the save_environment_variable command without any pre-configured scope."
+commands.deny = ["save_environment_variable"]

@@ -224,7 +224,11 @@ export async function previewEnvironmentImport(
   request: ImportFileRequest,
 ): Promise<ImportPreview> {
   if (browserPreview) {
-    return { token: previewImportToken(request), items: [] };
+    return {
+      token: previewImportToken(request),
+      environmentRevision: previewSnapshot.revision,
+      items: [],
+    };
   }
   return invoke<ImportPreview>("preview_environment_import", { request });
 }
@@ -233,9 +237,13 @@ export async function applyEnvironmentImport(
   request: ImportFileRequest,
   strategy: ImportConflictStrategy,
   expectedToken: string,
+  expectedRevision: string,
 ): Promise<MutationResult> {
   if (browserPreview) {
-    if (expectedToken !== previewImportToken(request)) {
+    if (
+      expectedToken !== previewImportToken(request) ||
+      expectedRevision !== previewSnapshot.revision
+    ) {
       throw previewError("importPreviewChanged", "Import preview has changed.");
     }
     return { snapshot: structuredClone(previewSnapshot), undoBackupIds: [] };
@@ -244,6 +252,7 @@ export async function applyEnvironmentImport(
     request,
     strategy,
     expectedToken,
+    expectedRevision,
   });
 }
 

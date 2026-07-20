@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-environment-import"
+description = "Enables the preview_environment_import command without any pre-configured scope."
+commands.allow = ["preview_environment_import"]
+
+[[permission]]
+identifier = "deny-preview-environment-import"
+description = "Denies the preview_environment_import command without any pre-configured scope."
+commands.deny = ["preview_environment_import"]

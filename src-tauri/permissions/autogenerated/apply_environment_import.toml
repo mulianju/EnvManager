@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-apply-environment-import"
+description = "Enables the apply_environment_import command without any pre-configured scope."
+commands.allow = ["apply_environment_import"]
+
+[[permission]]
+identifier = "deny-apply-environment-import"
+description = "Denies the apply_environment_import command without any pre-configured scope."
+commands.deny = ["apply_environment_import"]

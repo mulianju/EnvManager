@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-analyze-path-entries"
+description = "Enables the analyze_path_entries command without any pre-configured scope."
+commands.allow = ["analyze_path_entries"]
+
+[[permission]]
+identifier = "deny-analyze-path-entries"
+description = "Denies the analyze_path_entries command without any pre-configured scope."
+commands.deny = ["analyze_path_entries"]

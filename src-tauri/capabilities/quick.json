@@ -5,6 +5,9 @@
   "windows": ["quick"],
   "permissions": [
     "core:default",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "allow-get-environment-snapshot",
+    "allow-get-environment-revision",
+    "allow-get-favorites"
   ]
 }

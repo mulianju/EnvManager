@@ -1,0 +1,184 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvironmentScope {
+    User,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvironmentValueType {
+    String,
+    ExpandableString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentVariable {
+    pub name: String,
+    pub value: String,
+    pub value_type: EnvironmentValueType,
+    pub scope: EnvironmentScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentVariableInput {
+    pub original_name: Option<String>,
+    pub name: String,
+    pub value: String,
+    pub value_type: EnvironmentValueType,
+    pub scope: EnvironmentScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentValidationError {
+    EmptyName,
+    InvalidName,
+    InvalidValue,
+}
+
+impl fmt::Display for EnvironmentValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyName => formatter.write_str("Environment variable name is required."),
+            Self::InvalidName => {
+                formatter.write_str("Environment variable name cannot contain '=' or NUL.")
+            }
+            Self::InvalidValue => {
+                formatter.write_str("Environment variable value cannot contain NUL.")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EnvironmentValidationError {}
+
+impl EnvironmentVariableInput {
+    pub fn validate(&self) -> Result<(), EnvironmentValidationError> {
+        validate_variable_name(&self.name)?;
+        validate_variable_value(&self.value)
+    }
+}
+
+pub fn validate_variable_name(name: &str) -> Result<(), EnvironmentValidationError> {
+    if name.trim().is_empty() {
+        return Err(EnvironmentValidationError::EmptyName);
+    }
+    if name.contains('=') || name.contains('\0') {
+        return Err(EnvironmentValidationError::InvalidName);
+    }
+    Ok(())
+}
+
+pub fn validate_variable_value(value: &str) -> Result<(), EnvironmentValidationError> {
+    if value.contains('\0') {
+        return Err(EnvironmentValidationError::InvalidValue);
+    }
+    Ok(())
+}
+
+pub fn variable_names_equal(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+pub fn is_path_variable(name: &str) -> bool {
+    variable_names_equal(name, "Path")
+}
+
+pub fn parse_path_entries(value: &str) -> Vec<String> {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+pub fn join_path_entries(entries: &[String]) -> String {
+    entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+pub fn duplicate_path_entry_indexes(entries: &[String]) -> Vec<usize> {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        groups
+            .entry(normalize_path_entry(entry))
+            .or_default()
+            .push(index);
+    }
+
+    let mut duplicates = groups
+        .into_values()
+        .filter(|indexes| indexes.len() > 1)
+        .flatten()
+        .collect::<Vec<_>>();
+    duplicates.sort_unstable();
+    duplicates
+}
+
+fn normalize_path_entry(entry: &str) -> String {
+    let mut normalized = entry
+        .trim()
+        .trim_matches('"')
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    while normalized.len() > 3 && normalized.ends_with('\\') {
+        normalized.pop();
+    }
+    normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_windows_environment_variable_names() {
+        assert!(validate_variable_name("JAVA_HOME").is_ok());
+        assert!(validate_variable_name("Path").is_ok());
+        assert!(validate_variable_name("").is_err());
+        assert!(validate_variable_name("A=B").is_err());
+        assert!(validate_variable_name("A\0B").is_err());
+    }
+
+    #[test]
+    fn compares_variable_names_case_insensitively() {
+        assert!(variable_names_equal("Path", "PATH"));
+        assert!(!variable_names_equal("JAVA_HOME", "JDK_HOME"));
+    }
+
+    #[test]
+    fn parses_and_joins_path_entries() {
+        let entries = parse_path_entries(r" C:\Tools ;%JAVA_HOME%\bin;;C:\Windows ");
+
+        assert_eq!(
+            entries,
+            vec![r"C:\Tools", r"%JAVA_HOME%\bin", r"C:\Windows"]
+        );
+        assert_eq!(
+            join_path_entries(&entries),
+            r"C:\Tools;%JAVA_HOME%\bin;C:\Windows"
+        );
+    }
+
+    #[test]
+    fn identifies_duplicate_path_entries() {
+        let entries = vec![
+            r"C:\Tools".to_owned(),
+            r"c:\tools\".to_owned(),
+            r"C:\Windows".to_owned(),
+        ];
+
+        assert_eq!(duplicate_path_entry_indexes(&entries), vec![0, 1]);
+    }
+}

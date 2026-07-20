@@ -795,6 +795,10 @@ fn expand_percent_variables_once(value: &str, variables: &HashMap<String, String
 mod tests {
     use super::*;
     use crate::domain::environment::{EnvironmentValueType, TransferMode, TransferVariableInput};
+    use crate::services::transfer_file::{
+        ExportFileRequest, ImportAction, ImportConflictStrategy, ImportFileRequest,
+        TransferFileFormat, parse_import_bytes,
+    };
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -805,6 +809,7 @@ mod tests {
         broadcasts: usize,
         set_calls: usize,
         delete_calls: usize,
+        fail_next_set: Option<(EnvironmentScope, String)>,
         fail_next_delete: Option<(EnvironmentScope, String)>,
         fail_next_broadcast: bool,
         fail_list_after_next_mutation: bool,
@@ -835,6 +840,19 @@ mod tests {
         fn set(&self, input: &EnvironmentVariableInput) -> Result<(), EnvironmentStoreError> {
             let mut state = self.state.lock().unwrap();
             state.set_calls += 1;
+            let should_fail = state
+                .fail_next_set
+                .as_ref()
+                .is_some_and(|(failure_scope, failure_name)| {
+                    *failure_scope == input.scope
+                        && variable_names_equal(failure_name, &input.name)
+                });
+            if should_fail {
+                state.fail_next_set = None;
+                return Err(EnvironmentStoreError::OperationFailed(
+                    "injected set failure".to_owned(),
+                ));
+            }
             let variables = state.variables.entry(input.scope).or_default();
             if let Some(original_name) = &input.original_name {
                 variables.retain(|variable| !variable_names_equal(&variable.name, original_name));
@@ -1008,6 +1026,79 @@ mod tests {
             .unwrap();
         assert_eq!(actual.value, value);
         assert_eq!(actual.scope, scope);
+    }
+
+    struct TestFile {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TestFile {
+        fn new(label: &str, extension: &str, bytes: &[u8]) -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "env-manager-service-file-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join(format!("variables.{extension}"));
+            std::fs::write(&path, bytes).unwrap();
+            Self { directory, path }
+        }
+
+        fn import_request(
+            &self,
+            format: TransferFileFormat,
+            default_scope: Option<EnvironmentScope>,
+        ) -> ImportFileRequest {
+            ImportFileRequest {
+                path: self.path.clone(),
+                format,
+                default_scope,
+            }
+        }
+
+        fn export_request(
+            &self,
+            format: TransferFileFormat,
+            scope: Option<EnvironmentScope>,
+        ) -> ExportFileRequest {
+            ExportFileRequest {
+                path: self.path.clone(),
+                format,
+                scope,
+            }
+        }
+    }
+
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            if self.directory.exists() {
+                std::fs::remove_dir_all(&self.directory).unwrap();
+            }
+        }
+    }
+
+    fn json_import(variables: &[EnvironmentVariable]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "variables": variables,
+        }))
+        .unwrap()
+    }
+
+    fn find_preview_item<'a>(
+        preview: &'a crate::services::transfer_file::ImportPreview,
+        name: &str,
+    ) -> &'a crate::services::transfer_file::ImportPreviewItem {
+        preview
+            .items
+            .iter()
+            .find(|item| variable_names_equal(&item.variable.name, name))
+            .unwrap()
     }
 
     #[test]
@@ -2075,6 +2166,414 @@ mod tests {
                 "destination"
             )]
         );
+    }
+
+    #[test]
+    fn import_preview_classifies_create_update_and_unchanged_without_side_effects() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::System,
+            vec![
+                variable(EnvironmentScope::System, "Existing", "before"),
+                variable(EnvironmentScope::System, "SAME", "same"),
+            ],
+        );
+        let file = TestFile::new(
+            "preview",
+            "env",
+            b"EXISTING=after\nSame=same\nNEW_VALUE=fresh\n",
+        );
+        let request = file.import_request(
+            TransferFileFormat::DotEnv,
+            Some(EnvironmentScope::System),
+        );
+
+        let preview = harness.service.preview_import(&request).unwrap();
+
+        let update = find_preview_item(&preview, "existing");
+        assert_eq!(update.action, ImportAction::Update);
+        assert_eq!(update.variable.name, "EXISTING");
+        assert_eq!(update.existing.as_ref().unwrap().name, "Existing");
+        assert_eq!(update.existing.as_ref().unwrap().value, "before");
+        assert_eq!(
+            find_preview_item(&preview, "same").action,
+            ImportAction::Unchanged
+        );
+        assert_eq!(
+            find_preview_item(&preview, "new_value").action,
+            ImportAction::Create
+        );
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 0);
+        assert_eq!(state.delete_calls, 0);
+        assert_eq!(state.broadcasts, 0);
+        assert!(!harness.directory.exists());
+    }
+
+    #[test]
+    fn import_skip_existing_only_creates_missing_variables() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![
+                variable(EnvironmentScope::User, "EXISTING", "before"),
+                variable(EnvironmentScope::User, "SAME", "same"),
+            ],
+        );
+        let file = TestFile::new(
+            "skip-existing",
+            "env",
+            b"EXISTING=after\nSAME=same\nNEW_VALUE=fresh\n",
+        );
+        let request = file.import_request(
+            TransferFileFormat::DotEnv,
+            Some(EnvironmentScope::User),
+        );
+
+        let result = harness
+            .service
+            .apply_import(&request, ImportConflictStrategy::SkipExisting)
+            .unwrap();
+
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::User,
+            "EXISTING",
+            "before",
+        );
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::User,
+            "SAME",
+            "same",
+        );
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::User,
+            "NEW_VALUE",
+            "fresh",
+        );
+        assert_eq!(result.undo_backup_ids.len(), 1);
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 1);
+        assert_eq!(state.broadcasts, 1);
+        drop(state);
+        let backup = harness
+            .service
+            .backups
+            .load(&result.undo_backup_ids[0])
+            .unwrap();
+        assert_eq!(backup.reason, "beforeImport");
+        assert_eq!(backup.scope, EnvironmentScope::User);
+    }
+
+    #[test]
+    fn import_overwrite_writes_creates_and_updates_but_skips_unchanged_values() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![
+                variable(EnvironmentScope::User, "EXISTING", "before"),
+                variable(EnvironmentScope::User, "SAME", "same"),
+            ],
+        );
+        let file = TestFile::new(
+            "overwrite",
+            "env",
+            b"EXISTING=after\nSAME=same\nNEW_VALUE=fresh\n",
+        );
+        let request = file.import_request(
+            TransferFileFormat::DotEnv,
+            Some(EnvironmentScope::User),
+        );
+
+        let result = harness
+            .service
+            .apply_import(&request, ImportConflictStrategy::Overwrite)
+            .unwrap();
+
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::User,
+            "EXISTING",
+            "after",
+        );
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::User,
+            "NEW_VALUE",
+            "fresh",
+        );
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 2);
+        assert_eq!(state.broadcasts, 1);
+    }
+
+    #[test]
+    fn mixed_scope_import_preflights_system_permission_before_backup_or_write() {
+        let harness = service(false);
+        let variables = vec![
+            variable(EnvironmentScope::User, "USER_VALUE", "user"),
+            variable(EnvironmentScope::System, "SYSTEM_VALUE", "system"),
+        ];
+        let file = TestFile::new("permission", "json", &json_import(&variables));
+        let request = file.import_request(TransferFileFormat::Json, None);
+
+        let result = harness
+            .service
+            .apply_import(&request, ImportConflictStrategy::Overwrite);
+
+        assert!(matches!(
+            result,
+            Err(EnvironmentServiceError::ElevationRequired)
+        ));
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 0);
+        assert_eq!(state.delete_calls, 0);
+        assert_eq!(state.broadcasts, 0);
+        assert!(!harness.directory.exists());
+    }
+
+    #[test]
+    fn mixed_scope_import_backs_up_once_per_scope_broadcasts_once_and_can_be_undone() {
+        let harness = service(true);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "USER_VALUE", "before-user")],
+        );
+        seed(
+            &harness.state,
+            EnvironmentScope::System,
+            vec![variable(
+                EnvironmentScope::System,
+                "SYSTEM_VALUE",
+                "before-system",
+            )],
+        );
+        let variables = vec![
+            variable(EnvironmentScope::User, "USER_VALUE", "after-user"),
+            variable(
+                EnvironmentScope::System,
+                "SYSTEM_VALUE",
+                "after-system",
+            ),
+        ];
+        let file = TestFile::new("mixed-success", "json", &json_import(&variables));
+        let request = file.import_request(TransferFileFormat::Json, None);
+
+        let result = harness
+            .service
+            .apply_import(&request, ImportConflictStrategy::Overwrite)
+            .unwrap();
+
+        assert_eq!(result.undo_backup_ids.len(), 2);
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::User,
+            "USER_VALUE",
+            "after-user",
+        );
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::System,
+            "SYSTEM_VALUE",
+            "after-system",
+        );
+        let backups = result
+            .undo_backup_ids
+            .iter()
+            .map(|id| harness.service.backups.load(id).unwrap())
+            .collect::<Vec<_>>();
+        assert!(backups.iter().all(|backup| backup.reason == "beforeImport"));
+        assert_eq!(
+            backups
+                .iter()
+                .map(|backup| backup.scope)
+                .collect::<HashSet<_>>(),
+            HashSet::from([EnvironmentScope::User, EnvironmentScope::System])
+        );
+        assert_eq!(harness.state.lock().unwrap().broadcasts, 1);
+
+        let undone = harness
+            .service
+            .undo_mutation(&result.undo_backup_ids)
+            .unwrap();
+        assert_variable(
+            &undone.snapshot,
+            EnvironmentScope::User,
+            "USER_VALUE",
+            "before-user",
+        );
+        assert_variable(
+            &undone.snapshot,
+            EnvironmentScope::System,
+            "SYSTEM_VALUE",
+            "before-system",
+        );
+        assert_eq!(harness.state.lock().unwrap().broadcasts, 2);
+    }
+
+    #[test]
+    fn failed_mixed_scope_import_rolls_back_every_scope_without_broadcasting() {
+        let harness = service(true);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "USER_VALUE", "before-user")],
+        );
+        seed(
+            &harness.state,
+            EnvironmentScope::System,
+            vec![variable(
+                EnvironmentScope::System,
+                "SYSTEM_VALUE",
+                "before-system",
+            )],
+        );
+        let variables = vec![
+            variable(EnvironmentScope::User, "USER_VALUE", "after-user"),
+            variable(
+                EnvironmentScope::System,
+                "SYSTEM_VALUE",
+                "after-system",
+            ),
+        ];
+        let file = TestFile::new("mixed-failure", "json", &json_import(&variables));
+        let request = file.import_request(TransferFileFormat::Json, None);
+        harness.state.lock().unwrap().fail_next_set = Some((
+            EnvironmentScope::System,
+            "SYSTEM_VALUE".to_owned(),
+        ));
+
+        let result = harness
+            .service
+            .apply_import(&request, ImportConflictStrategy::Overwrite);
+
+        assert!(matches!(result, Err(EnvironmentServiceError::Store(_))));
+        let state = harness.state.lock().unwrap();
+        assert_eq!(
+            state.variables[&EnvironmentScope::User],
+            vec![variable(
+                EnvironmentScope::User,
+                "USER_VALUE",
+                "before-user"
+            )]
+        );
+        assert_eq!(
+            state.variables[&EnvironmentScope::System],
+            vec![variable(
+                EnvironmentScope::System,
+                "SYSTEM_VALUE",
+                "before-system"
+            )]
+        );
+        assert_eq!(state.broadcasts, 0);
+    }
+
+    #[test]
+    fn import_rejects_an_empty_file_without_side_effects() {
+        let harness = service(false);
+        let file = TestFile::new("empty", "env", b"# comments only\n\n");
+        let request = file.import_request(
+            TransferFileFormat::DotEnv,
+            Some(EnvironmentScope::User),
+        );
+
+        assert!(
+            harness
+                .service
+                .apply_import(&request, ImportConflictStrategy::Overwrite)
+                .is_err()
+        );
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 0);
+        assert_eq!(state.broadcasts, 0);
+        assert!(!harness.directory.exists());
+    }
+
+    #[test]
+    fn apply_import_reloads_a_file_that_changed_after_preview() {
+        let harness = service(false);
+        let file = TestFile::new("reload", "env", b"VALUE=preview\n");
+        let request = file.import_request(
+            TransferFileFormat::DotEnv,
+            Some(EnvironmentScope::User),
+        );
+        let preview = harness.service.preview_import(&request).unwrap();
+        assert_eq!(find_preview_item(&preview, "VALUE").variable.value, "preview");
+        std::fs::write(&file.path, b"VALUE=latest\n").unwrap();
+
+        let result = harness
+            .service
+            .apply_import(&request, ImportConflictStrategy::Overwrite)
+            .unwrap();
+
+        assert_variable(
+            &result.snapshot,
+            EnvironmentScope::User,
+            "VALUE",
+            "latest",
+        );
+    }
+
+    #[test]
+    fn export_reads_current_scopes_without_elevation_backup_or_broadcast() {
+        let harness = service(false);
+        let user = variable(EnvironmentScope::User, "USER_VALUE", "user");
+        let system = expandable_variable(
+            EnvironmentScope::System,
+            "SYSTEM_VALUE",
+            "%SystemRoot%",
+        );
+        seed(&harness.state, EnvironmentScope::User, vec![user.clone()]);
+        seed(
+            &harness.state,
+            EnvironmentScope::System,
+            vec![system.clone()],
+        );
+        let all_file = TestFile::new("export-all", "json", b"old");
+        let all_request = all_file.export_request(TransferFileFormat::Json, None);
+
+        let summary = harness.service.export_file(&all_request).unwrap();
+
+        assert_eq!(summary.path, all_file.path);
+        assert_eq!(summary.variable_count, 2);
+        assert_eq!(
+            parse_import_bytes(
+                TransferFileFormat::Json,
+                &std::fs::read(&all_file.path).unwrap(),
+                None,
+            )
+            .unwrap(),
+            vec![user.clone(), system.clone()]
+        );
+
+        let system_file = TestFile::new("export-system", "reg", b"old");
+        let system_request = system_file.export_request(
+            TransferFileFormat::Registry,
+            Some(EnvironmentScope::System),
+        );
+        let system_summary = harness.service.export_file(&system_request).unwrap();
+        assert_eq!(system_summary.variable_count, 1);
+        assert_eq!(
+            parse_import_bytes(
+                TransferFileFormat::Registry,
+                &std::fs::read(&system_file.path).unwrap(),
+                None,
+            )
+            .unwrap(),
+            vec![system]
+        );
+
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 0);
+        assert_eq!(state.delete_calls, 0);
+        assert_eq!(state.broadcasts, 0);
+        assert!(!harness.directory.exists());
     }
 
     #[test]

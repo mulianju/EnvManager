@@ -79,16 +79,16 @@ mod tests {
     fn json_schema_v1_round_trips_scope_type_and_value() {
         let expected = vec![
             variable(
-                EnvironmentScope::System,
-                "Path",
-                r"%SystemRoot%\System32",
-                EnvironmentValueType::ExpandableString,
-            ),
-            variable(
                 EnvironmentScope::User,
                 "JAVA_HOME",
                 r"C:\Java\jdk",
                 EnvironmentValueType::String,
+            ),
+            variable(
+                EnvironmentScope::System,
+                "Path",
+                r"%SystemRoot%\System32",
+                EnvironmentValueType::ExpandableString,
             ),
         ];
 

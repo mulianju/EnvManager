@@ -139,6 +139,33 @@ describe("browser preview API contracts", () => {
       expectedRevision: "preview-revision",
     });
   });
+
+  it("passes transfer, favorite, and undo receipts through typed Tauri payloads", async () => {
+    const invoke = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const api = await import("./api");
+    const input: TransferVariableInputContract = {
+      sourceScope: "user",
+      targetScope: "system",
+      name: "JAVA_HOME",
+      mode: "move",
+      overwrite: true,
+    };
+    const favorite: FavoriteKeyContract = { scope: "user", name: "JAVA_HOME" };
+
+    await api.transferEnvironmentVariable(input);
+    await api.toggleFavorite(favorite);
+    await api.undoEnvironmentMutation(["user-backup", "system-backup"]);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "transfer_environment_variable", {
+      input,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "toggle_favorite", { favorite });
+    expect(invoke).toHaveBeenNthCalledWith(3, "undo_environment_mutation", {
+      backupIds: ["user-backup", "system-backup"],
+    });
+  });
 });
 
 async function loadPreviewApi() {

@@ -9,9 +9,19 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
+use std::sync::{Mutex, MutexGuard, OnceLock};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const MAX_SETTINGS_SIZE: u64 = 1024 * 1024;
+#[cfg(windows)]
+const SETTINGS_LOCK_TIMEOUT_MS: u32 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +46,8 @@ pub enum SettingsError {
     Validation(EnvironmentValidationError),
     DuplicateFavorite,
     FileTooLarge,
+    LockTimeout,
+    LockFailed(io::Error),
 }
 
 impl fmt::Display for SettingsError {
@@ -56,6 +68,12 @@ impl fmt::Display for SettingsError {
             Self::FileTooLarge => {
                 formatter.write_str("Settings file is too large (maximum 1 MiB).")
             }
+            Self::LockTimeout => {
+                formatter.write_str("Timed out waiting for the settings write lock.")
+            }
+            Self::LockFailed(error) => {
+                write!(formatter, "Settings write lock failed: {error}")
+            }
         }
     }
 }
@@ -66,6 +84,7 @@ impl std::error::Error for SettingsError {
             Self::Io(error) => Some(error),
             Self::InvalidJson(error) => Some(error),
             Self::Validation(error) => Some(error),
+            Self::LockFailed(error) => Some(error),
             _ => None,
         }
     }
@@ -96,10 +115,15 @@ impl SettingsStore {
     }
 
     pub fn list(&self) -> Result<Vec<FavoriteKey>, SettingsError> {
+        self.list_unlocked()
+    }
+
+    fn list_unlocked(&self) -> Result<Vec<FavoriteKey>, SettingsError> {
         Ok(self.read_document()?.favorites)
     }
 
     pub fn toggle(&self, favorite: FavoriteKey) -> Result<Vec<FavoriteKey>, SettingsError> {
+        let _write_guard = acquire_settings_write_lock()?;
         validate_variable_name(&favorite.name).map_err(SettingsError::Validation)?;
         let mut document = self.read_document()?;
         if let Some(index) = document.favorites.iter().position(|existing| {
@@ -119,6 +143,7 @@ impl SettingsStore {
         user_variables: &[EnvironmentVariable],
         system_variables: &[EnvironmentVariable],
     ) -> Result<Vec<FavoriteKey>, SettingsError> {
+        let _write_guard = acquire_settings_write_lock()?;
         let document = self.read_document()?;
         let mut favorites = document
             .favorites
@@ -177,6 +202,9 @@ impl SettingsStore {
 
     fn write_document(&self, document: &SettingsDocument) -> Result<(), SettingsError> {
         let bytes = serde_json::to_vec_pretty(document).map_err(SettingsError::InvalidJson)?;
+        if bytes.len() as u64 > MAX_SETTINGS_SIZE {
+            return Err(SettingsError::FileTooLarge);
+        }
         if let Some(directory) = self
             .path
             .parent()
@@ -187,6 +215,69 @@ impl SettingsStore {
         write_bytes_atomically(&self.path, &bytes)?;
         Ok(())
     }
+}
+
+#[cfg(windows)]
+struct SettingsWriteGuard {
+    handle: HANDLE,
+    owns_mutex: bool,
+}
+
+#[cfg(windows)]
+impl Drop for SettingsWriteGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if self.owns_mutex {
+                ReleaseMutex(self.handle);
+            }
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn acquire_settings_write_lock() -> Result<SettingsWriteGuard, SettingsError> {
+    let name = "Local\\EnvManager.Settings"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Err(SettingsError::LockFailed(io::Error::last_os_error()));
+    }
+
+    let mut guard = SettingsWriteGuard {
+        handle,
+        owns_mutex: false,
+    };
+    match unsafe { WaitForSingleObject(handle, SETTINGS_LOCK_TIMEOUT_MS) } {
+        WAIT_OBJECT_0 | WAIT_ABANDONED => {
+            guard.owns_mutex = true;
+            Ok(guard)
+        }
+        WAIT_TIMEOUT => Err(SettingsError::LockTimeout),
+        WAIT_FAILED => Err(SettingsError::LockFailed(io::Error::last_os_error())),
+        status => Err(SettingsError::LockFailed(io::Error::other(format!(
+            "Unexpected wait status {status}."
+        )))),
+    }
+}
+
+#[cfg(not(windows))]
+struct SettingsWriteGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+#[cfg(not(windows))]
+fn acquire_settings_write_lock() -> Result<SettingsWriteGuard, SettingsError> {
+    static SETTINGS_WRITE_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    let guard = SETTINGS_WRITE_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| {
+            SettingsError::LockFailed(io::Error::other("Settings write lock is poisoned."))
+        })?;
+    Ok(SettingsWriteGuard { _guard: guard })
 }
 
 fn empty_document() -> SettingsDocument {
@@ -249,13 +340,15 @@ fn default_settings_path() -> Result<PathBuf, SettingsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FavoriteKey, SettingsStore};
+    use super::{FavoriteKey, MAX_SETTINGS_SIZE, SettingsStore};
     use crate::domain::environment::{
         EnvironmentScope, EnvironmentValueType, EnvironmentVariable, compare_variable_names,
     };
     use serde_json::{Value, json};
     use std::cmp::Ordering;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const SECRET_VALUE: &str = "real-secret-must-never-be-persisted";
@@ -445,6 +538,16 @@ mod tests {
             );
             assert_eq!(std::fs::read(&path).unwrap(), original);
         }
+
+        assert_eq!(
+            store
+                .toggle(favorite(EnvironmentScope::User, "AFTER_ERROR"))
+                .unwrap(),
+            vec![
+                favorite(EnvironmentScope::User, "AFTER_ERROR"),
+                favorite(EnvironmentScope::User, "KEEP_ME"),
+            ]
+        );
     }
 
     #[test]
@@ -546,6 +649,71 @@ mod tests {
                 .to_string_lossy()
                 .contains(".tmp")
         }));
+    }
+
+    #[test]
+    fn oversized_serialized_update_preserves_file_and_releases_write_lock() {
+        let directory = TempDirectory::new("oversized-write");
+        let path = directory.path().join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        store
+            .toggle(favorite(EnvironmentScope::User, "KEEP"))
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let oversized_name = "A".repeat(MAX_SETTINGS_SIZE as usize);
+
+        assert_error_contains(
+            store.toggle(favorite(EnvironmentScope::User, &oversized_name)),
+            &["large"],
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(
+            store
+                .toggle(favorite(EnvironmentScope::User, "NEXT"))
+                .unwrap(),
+            vec![
+                favorite(EnvironmentScope::User, "KEEP"),
+                favorite(EnvironmentScope::User, "NEXT"),
+            ]
+        );
+    }
+
+    #[test]
+    fn concurrent_toggles_preserve_both_updates() {
+        for iteration in 0..24 {
+            let directory = TempDirectory::new(&format!("concurrent-{iteration}"));
+            let path = directory.path().join("settings.json");
+            let stores = [
+                Arc::new(SettingsStore::new(path.clone())),
+                Arc::new(SettingsStore::new(path.clone())),
+            ];
+            let barrier = Arc::new(Barrier::new(3));
+            let workers = stores
+                .into_iter()
+                .zip(["LEFT", "RIGHT"])
+                .map(|(store, name)| {
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+                        store
+                            .toggle(favorite(EnvironmentScope::User, name))
+                            .unwrap();
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            barrier.wait();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            assert_eq!(
+                SettingsStore::new(path).list().unwrap(),
+                vec![
+                    favorite(EnvironmentScope::User, "LEFT"),
+                    favorite(EnvironmentScope::User, "RIGHT"),
+                ]
+            );
+        }
     }
 
     #[test]

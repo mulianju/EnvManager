@@ -1,7 +1,7 @@
 use crate::domain::environment::{
     EnvironmentScope, EnvironmentValidationError, EnvironmentValueType, EnvironmentVariable,
-    EnvironmentVariableInput, TransferMode, TransferVariableInput, duplicate_path_entry_indexes,
-    is_path_variable, join_path_entries, normalize_variable_name, parse_path_entries,
+    EnvironmentVariableInput, TransferMode, TransferVariableInput, compare_variable_names,
+    duplicate_path_entry_indexes, is_path_variable, join_path_entries, parse_path_entries,
     variable_names_equal,
 };
 use crate::platform::{EnvironmentStore, EnvironmentStoreError};
@@ -12,7 +12,7 @@ use crate::services::transfer_file::{
     write_export_file,
 };
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -475,11 +475,10 @@ impl EnvironmentService {
     ) -> Result<Vec<PathEntryStatus>, EnvironmentServiceError> {
         let system = self.store.list(EnvironmentScope::System)?;
         let user = self.store.list(EnvironmentScope::User)?;
-        let variables = system
-            .into_iter()
-            .chain(user)
-            .map(|variable| (normalize_variable_name(&variable.name), variable.value))
-            .collect::<HashMap<_, _>>();
+        let mut variables = Vec::new();
+        for variable in system.into_iter().chain(user) {
+            upsert_named_value(&mut variables, variable.name, variable.value);
+        }
         let duplicates = duplicate_path_entry_indexes(entries)
             .into_iter()
             .collect::<HashSet<_>>();
@@ -596,12 +595,11 @@ impl EnvironmentService {
         variables: &[EnvironmentVariable],
     ) -> Result<(), EnvironmentServiceError> {
         let current = self.store.list(scope)?;
-        let target_names = variables
-            .iter()
-            .map(|variable| normalize_variable_name(&variable.name))
-            .collect::<HashSet<_>>();
         for variable in &current {
-            if !target_names.contains(&normalize_variable_name(&variable.name)) {
+            if !variables
+                .iter()
+                .any(|target| variable_names_equal(&target.name, &variable.name))
+            {
                 self.store.delete(scope, &variable.name)?;
             }
         }
@@ -642,29 +640,56 @@ impl EnvironmentService {
     }
 }
 
+fn upsert_named_value(values: &mut Vec<(String, String)>, name: String, value: String) {
+    if let Some(existing) = values
+        .iter_mut()
+        .find(|(candidate, _)| variable_names_equal(candidate, &name))
+    {
+        *existing = (name, value);
+    } else {
+        values.push((name, value));
+    }
+}
+
+fn upsert_process_value(
+    values: &mut Vec<(String, String, bool)>,
+    name: String,
+    value: String,
+    expandable: bool,
+) {
+    if let Some(existing) = values
+        .iter_mut()
+        .find(|(candidate, _, _)| variable_names_equal(candidate, &name))
+    {
+        *existing = (name, value, expandable);
+    } else {
+        values.push((name, value, expandable));
+    }
+}
+
 pub fn build_effective_variables(
     user: &[EnvironmentVariable],
     system: &[EnvironmentVariable],
 ) -> Vec<EffectiveEnvironmentVariable> {
-    let user_by_name = user
-        .iter()
-        .map(|variable| (normalize_variable_name(&variable.name), variable))
-        .collect::<HashMap<_, _>>();
-    let system_by_name = system
-        .iter()
-        .map(|variable| (normalize_variable_name(&variable.name), variable))
-        .collect::<HashMap<_, _>>();
-    let names = user_by_name
-        .keys()
-        .chain(system_by_name.keys())
-        .cloned()
-        .collect::<HashSet<_>>();
+    let mut names = Vec::<&str>::new();
+    for variable in user.iter().chain(system) {
+        if !names
+            .iter()
+            .any(|name| variable_names_equal(name, &variable.name))
+        {
+            names.push(&variable.name);
+        }
+    }
 
     let mut effective = names
         .into_iter()
         .filter_map(|name| {
-            let user_variable = user_by_name.get(&name).copied();
-            let system_variable = system_by_name.get(&name).copied();
+            let user_variable = user
+                .iter()
+                .find(|variable| variable_names_equal(&variable.name, name));
+            let system_variable = system
+                .iter()
+                .find(|variable| variable_names_equal(&variable.name, name));
 
             if is_path_variable(&name) {
                 return match (user_variable, system_variable) {
@@ -726,9 +751,7 @@ pub fn build_effective_variables(
         })
         .collect::<Vec<_>>();
     effective.sort_by(|left, right| {
-        normalize_variable_name(&left.name)
-            .cmp(&normalize_variable_name(&right.name))
-            .then_with(|| left.name.cmp(&right.name))
+        compare_variable_names(&left.name, &right.name).then_with(|| left.name.cmp(&right.name))
     });
     effective
 }
@@ -763,9 +786,7 @@ pub fn environment_revision(
     records.sort_by(|(left_scope, left), (right_scope, right)| {
         scope_order(*left_scope)
             .cmp(&scope_order(*right_scope))
-            .then_with(|| {
-                normalize_variable_name(&left.name).cmp(&normalize_variable_name(&right.name))
-            })
+            .then_with(|| compare_variable_names(&left.name, &right.name))
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| {
                 value_type_order(left.value_type).cmp(&value_type_order(right.value_type))
@@ -776,10 +797,6 @@ pub fn environment_revision(
     let mut hash = 0xcbf29ce484222325u64;
     for (scope, variable) in records {
         hash_revision_field(&mut hash, &[scope_order(scope)]);
-        hash_revision_field(
-            &mut hash,
-            normalize_variable_name(&variable.name).as_bytes(),
-        );
         hash_revision_field(&mut hash, variable.name.as_bytes());
         hash_revision_field(&mut hash, &[value_type_order(variable.value_type)]);
         hash_revision_field(&mut hash, variable.value.as_bytes());
@@ -817,37 +834,30 @@ pub fn compose_process_environment(
     user: &[EnvironmentVariable],
     system: &[EnvironmentVariable],
 ) -> Vec<(String, String)> {
-    let mut composed = HashMap::<String, (String, String, bool)>::new();
+    let mut composed = Vec::<(String, String, bool)>::new();
     for (name, value) in base.iter().filter(|(name, _)| !is_path_variable(name)) {
-        composed.insert(
-            normalize_variable_name(name),
-            (name.clone(), value.clone(), false),
-        );
+        upsert_process_value(&mut composed, name.clone(), value.clone(), false);
     }
     for variable in system
         .iter()
         .filter(|variable| !is_path_variable(&variable.name))
     {
-        composed.insert(
-            normalize_variable_name(&variable.name),
-            (
-                variable.name.clone(),
-                variable.value.clone(),
-                variable.value_type == EnvironmentValueType::ExpandableString,
-            ),
+        upsert_process_value(
+            &mut composed,
+            variable.name.clone(),
+            variable.value.clone(),
+            variable.value_type == EnvironmentValueType::ExpandableString,
         );
     }
     for variable in user
         .iter()
         .filter(|variable| !is_path_variable(&variable.name))
     {
-        composed.insert(
-            normalize_variable_name(&variable.name),
-            (
-                variable.name.clone(),
-                variable.value.clone(),
-                variable.value_type == EnvironmentValueType::ExpandableString,
-            ),
+        upsert_process_value(
+            &mut composed,
+            variable.name.clone(),
+            variable.value.clone(),
+            variable.value_type == EnvironmentValueType::ExpandableString,
         );
     }
 
@@ -872,16 +882,18 @@ pub fn compose_process_environment(
             .expect("registry path was checked")
             .name
             .clone();
-        composed.insert(
-            "path".to_owned(),
-            (display_name, join_path_entries(&entries), false),
+        upsert_process_value(
+            &mut composed,
+            display_name,
+            join_path_entries(&entries),
+            false,
         );
     }
 
     let raw_values = composed
         .iter()
-        .map(|(normalized_name, (_, value, _))| (normalized_name.clone(), value.clone()))
-        .collect::<HashMap<_, _>>();
+        .map(|(name, value, _)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
     let expanded_path = if system_path.is_some() || user_path.is_some() {
         Some(join_path_entries(
             &system_path
@@ -899,8 +911,8 @@ pub fn compose_process_environment(
     };
     let mut result = composed
         .into_iter()
-        .map(|(normalized_name, (name, value, expandable))| {
-            let value = if normalized_name == "path" {
+        .map(|(name, value, expandable)| {
+            let value = if is_path_variable(&name) {
                 expanded_path.clone().unwrap_or(value)
             } else if expandable {
                 expand_percent_variables(&value, &raw_values)
@@ -911,16 +923,14 @@ pub fn compose_process_environment(
         })
         .collect::<Vec<_>>();
     result.sort_by(|(left, _), (right, _)| {
-        normalize_variable_name(left)
-            .cmp(&normalize_variable_name(right))
-            .then_with(|| left.cmp(right))
+        compare_variable_names(left, right).then_with(|| left.cmp(right))
     });
     result
 }
 
 fn expanded_path_entries(
     variable: &EnvironmentVariable,
-    variables: &HashMap<String, String>,
+    variables: &[(String, String)],
 ) -> Vec<String> {
     let value = if variable.value_type == EnvironmentValueType::ExpandableString {
         expand_percent_variables(&variable.value, variables)
@@ -930,7 +940,7 @@ fn expanded_path_entries(
     parse_path_entries(&value)
 }
 
-fn expand_percent_variables(value: &str, variables: &HashMap<String, String>) -> String {
+fn expand_percent_variables(value: &str, variables: &[(String, String)]) -> String {
     let mut expanded = value.to_owned();
     for _ in 0..5 {
         let next = expand_percent_variables_once(&expanded, variables);
@@ -942,7 +952,7 @@ fn expand_percent_variables(value: &str, variables: &HashMap<String, String>) ->
     expanded
 }
 
-fn expand_percent_variables_once(value: &str, variables: &HashMap<String, String>) -> String {
+fn expand_percent_variables_once(value: &str, variables: &[(String, String)]) -> String {
     let bytes = value.as_bytes();
     let mut output = String::with_capacity(value.len());
     let mut cursor = 0;
@@ -956,7 +966,10 @@ fn expand_percent_variables_once(value: &str, variables: &HashMap<String, String
         };
         let end = start + 1 + relative_end;
         let name = &value[start + 1..end];
-        if let Some(replacement) = variables.get(&normalize_variable_name(name)) {
+        if let Some((_, replacement)) = variables
+            .iter()
+            .find(|(candidate, _)| variable_names_equal(candidate, name))
+        {
             output.push_str(replacement);
         } else {
             output.push_str(&value[start..=end]);
@@ -976,7 +989,7 @@ mod tests {
         ExportFileRequest, ImportAction, ImportConflictStrategy, ImportFileRequest,
         TransferFileFormat, parse_import_bytes,
     };
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1326,6 +1339,20 @@ mod tests {
         assert_eq!(system_only.source, EffectiveVariableSource::System);
         assert!(!system_only.shadowed);
         assert!(!system_only.conflict);
+    }
+
+    #[test]
+    fn effective_variables_merge_unicode_case_variants() {
+        let user = vec![variable(EnvironmentScope::User, "ÄPFEL", "user")];
+        let system = vec![variable(EnvironmentScope::System, "äpfel", "system")];
+
+        let effective = build_effective_variables(&user, &system);
+
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].name, "ÄPFEL");
+        assert_eq!(effective[0].value, "user");
+        assert!(effective[0].shadowed);
+        assert!(effective[0].conflict);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -106,11 +107,45 @@ pub fn validate_variable_value(value: &str) -> Result<(), EnvironmentValidationE
 }
 
 pub fn variable_names_equal(left: &str, right: &str) -> bool {
-    normalize_variable_name(left) == normalize_variable_name(right)
+    compare_variable_names(left, right) == Ordering::Equal
 }
 
-pub fn normalize_variable_name(name: &str) -> String {
-    name.to_lowercase()
+#[cfg(windows)]
+pub fn compare_variable_names(left: &str, right: &str) -> Ordering {
+    use windows_sys::Win32::Globalization::{
+        CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal,
+    };
+
+    let left = left.encode_utf16().collect::<Vec<_>>();
+    let right = right.encode_utf16().collect::<Vec<_>>();
+    let (Ok(left_len), Ok(right_len)) = (i32::try_from(left.len()), i32::try_from(right.len()))
+    else {
+        return fallback_variable_name_order(
+            &String::from_utf16_lossy(&left),
+            &String::from_utf16_lossy(&right),
+        );
+    };
+    match unsafe { CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) } {
+        CSTR_LESS_THAN => Ordering::Less,
+        CSTR_EQUAL => Ordering::Equal,
+        CSTR_GREATER_THAN => Ordering::Greater,
+        _ => fallback_variable_name_order(
+            &String::from_utf16_lossy(&left),
+            &String::from_utf16_lossy(&right),
+        ),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn compare_variable_names(left: &str, right: &str) -> Ordering {
+    fallback_variable_name_order(left, right)
+}
+
+fn fallback_variable_name_order(left: &str, right: &str) -> Ordering {
+    left.to_uppercase()
+        .cmp(&right.to_uppercase())
+        .then_with(|| left.to_lowercase().cmp(&right.to_lowercase()))
+        .then_with(|| left.cmp(right))
 }
 
 pub fn is_path_variable(name: &str) -> bool {
@@ -182,7 +217,20 @@ mod tests {
     fn compares_variable_names_case_insensitively() {
         assert!(variable_names_equal("Path", "PATH"));
         assert!(variable_names_equal("ÄPFEL", "äpfel"));
+        // Windows Registry permits these ordinally distinct names to coexist.
+        assert!(!variable_names_equal("Σ", "ς"));
         assert!(!variable_names_equal("JAVA_HOME", "JDK_HOME"));
+    }
+
+    #[test]
+    fn sorts_variable_names_stably_with_windows_identity() {
+        let mut names = vec!["z", "ς", "Σ", "A", "a"];
+
+        names.sort_by(|left, right| {
+            compare_variable_names(left, right).then_with(|| left.cmp(right))
+        });
+
+        assert_eq!(names, vec!["A", "a", "z", "Σ", "ς"]);
     }
 
     #[test]

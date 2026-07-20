@@ -1,10 +1,9 @@
 use crate::domain::environment::{
-    EnvironmentScope, EnvironmentValueType, EnvironmentVariable, normalize_variable_name,
-    validate_variable_name, validate_variable_value,
+    EnvironmentScope, EnvironmentValueType, EnvironmentVariable, compare_variable_names,
+    validate_variable_name, validate_variable_value, variable_names_equal,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -194,10 +193,6 @@ pub fn import_token(variables: &[EnvironmentVariable]) -> String {
     hasher.update(b"env-manager-import-v1");
     for variable in sorted_variables(variables) {
         hasher.update([scope_order(variable.scope)]);
-        hash_token_field(
-            &mut hasher,
-            normalize_variable_name(&variable.name).as_bytes(),
-        );
         hash_token_field(&mut hasher, variable.name.as_bytes());
         hasher.update([value_type_order(variable.value_type)]);
         hash_token_field(&mut hasher, variable.value.as_bytes());
@@ -273,7 +268,7 @@ fn parse_dotenv(
     scope: EnvironmentScope,
 ) -> Result<Vec<EnvironmentVariable>, TransferFileError> {
     let mut variables = Vec::new();
-    let mut names = HashSet::new();
+    let mut names = Vec::<String>::new();
     for (index, raw_line) in bytes.split(|byte| *byte == b'\n').enumerate() {
         let line_number = index + 1;
         let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
@@ -304,13 +299,17 @@ fn parse_dotenv(
                 "Invalid variable name.",
             ));
         }
-        if !names.insert(normalize_variable_name(name)) {
+        if names
+            .iter()
+            .any(|existing| variable_names_equal(existing, name))
+        {
             return Err(TransferFileError::line(
                 TransferFileFormat::DotEnv,
                 line_number,
                 "Duplicate variable name.",
             ));
         }
+        names.push(name.to_owned());
         let value = parse_dotenv_value(raw_value, line_number)?;
         variables.push(EnvironmentVariable {
             name: name.to_owned(),
@@ -468,7 +467,7 @@ fn parse_registry(bytes: &[u8]) -> Result<Vec<EnvironmentVariable>, TransferFile
 
     let mut scope = None;
     let mut variables = Vec::new();
-    let mut names = HashSet::new();
+    let mut names = Vec::<(EnvironmentScope, String)>::new();
     for (line_number, raw) in lines {
         let line = raw.trim();
         if line.is_empty() {
@@ -498,13 +497,16 @@ fn parse_registry(bytes: &[u8]) -> Result<Vec<EnvironmentVariable>, TransferFile
             )
         })?;
         let (name, data) = parse_registry_assignment(line, line_number)?;
-        if !names.insert((current_scope, normalize_variable_name(&name))) {
+        if names.iter().any(|(scope, existing)| {
+            *scope == current_scope && variable_names_equal(existing, &name)
+        }) {
             return Err(TransferFileError::line(
                 TransferFileFormat::Registry,
                 line_number,
                 "Duplicate variable name.",
             ));
         }
+        names.push((current_scope, name.clone()));
         let (value, value_type) = if let Some(quoted) = data.strip_prefix('"') {
             (
                 parse_registry_quoted(quoted, line_number)?,
@@ -825,14 +827,15 @@ fn validate_variables(
     format: TransferFileFormat,
     variables: &[EnvironmentVariable],
 ) -> Result<(), TransferFileError> {
-    let mut names = HashSet::new();
-    for variable in variables {
+    for (index, variable) in variables.iter().enumerate() {
         validate_variable_name(&variable.name)
             .map_err(|_| TransferFileError::format(format, "Invalid environment variable name."))?;
         validate_variable_value(&variable.value).map_err(|_| {
             TransferFileError::format(format, "Invalid environment variable value.")
         })?;
-        if !names.insert((variable.scope, normalize_variable_name(&variable.name))) {
+        if variables[..index].iter().any(|existing| {
+            existing.scope == variable.scope && variable_names_equal(&existing.name, &variable.name)
+        }) {
             return Err(TransferFileError::format(
                 format,
                 "Duplicate variable name in the same scope.",
@@ -847,9 +850,7 @@ fn sorted_variables(variables: &[EnvironmentVariable]) -> Vec<EnvironmentVariabl
     sorted.sort_by(|left, right| {
         scope_order(left.scope)
             .cmp(&scope_order(right.scope))
-            .then_with(|| {
-                normalize_variable_name(&left.name).cmp(&normalize_variable_name(&right.name))
-            })
+            .then_with(|| compare_variable_names(&left.name, &right.name))
             .then_with(|| left.name.cmp(&right.name))
     });
     sorted
@@ -1144,6 +1145,16 @@ mod tests {
             parse_import_bytes(TransferFileFormat::Json, json.as_bytes(), None),
             "duplicate",
         );
+    }
+
+    #[test]
+    fn json_allows_windows_ordinally_distinct_sigma_names_in_one_scope() {
+        let json = r#"{"schemaVersion":1,"variables":[{"name":"Σ","value":"one","valueType":"string","scope":"user"},{"name":"ς","value":"two","valueType":"string","scope":"user"}]}"#;
+
+        let variables =
+            parse_import_bytes(TransferFileFormat::Json, json.as_bytes(), None).unwrap();
+
+        assert_eq!(variables.len(), 2);
     }
 
     #[test]
@@ -1504,6 +1515,25 @@ NO_INTERPOLATION=$PLAIN/bin
             ),
             "duplicate",
         );
+    }
+
+    #[test]
+    fn registry_allows_windows_ordinally_distinct_sigma_names_in_one_scope() {
+        let text = concat!(
+            "Windows Registry Editor Version 5.00\r\n\r\n",
+            "[HKEY_CURRENT_USER\\Environment]\r\n",
+            "\"Σ\"=\"one\"\r\n",
+            "\"ς\"=\"two\"\r\n"
+        );
+
+        let variables = parse_import_bytes(
+            TransferFileFormat::Registry,
+            &encode_utf16le_bom(text),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(variables.len(), 2);
     }
 
     #[test]

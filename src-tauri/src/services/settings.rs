@@ -1,3 +1,252 @@
+use crate::domain::environment::{
+    EnvironmentScope, EnvironmentValidationError, EnvironmentVariable, compare_variable_names,
+    validate_variable_name, variable_names_equal,
+};
+use crate::services::transfer_file::write_bytes_atomically;
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::fmt;
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+
+const SETTINGS_SCHEMA_VERSION: u32 = 1;
+const MAX_SETTINGS_SIZE: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteKey {
+    pub scope: EnvironmentScope,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsDocument {
+    schema_version: u32,
+    favorites: Vec<FavoriteKey>,
+}
+
+#[derive(Debug)]
+pub enum SettingsError {
+    PathUnavailable,
+    Io(io::Error),
+    InvalidJson(serde_json::Error),
+    UnsupportedSchema(u32),
+    Validation(EnvironmentValidationError),
+    DuplicateFavorite,
+    FileTooLarge,
+}
+
+impl fmt::Display for SettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PathUnavailable => formatter.write_str("Settings path is unavailable."),
+            Self::Io(error) => write!(formatter, "Settings file operation failed: {error}"),
+            Self::InvalidJson(error) => write!(formatter, "Settings JSON is invalid: {error}"),
+            Self::UnsupportedSchema(version) => {
+                write!(formatter, "Settings schema {version} is not supported.")
+            }
+            Self::Validation(error) => {
+                write!(formatter, "Favorite variable name is invalid: {error}")
+            }
+            Self::DuplicateFavorite => {
+                formatter.write_str("Settings contain a duplicate favorite variable.")
+            }
+            Self::FileTooLarge => {
+                formatter.write_str("Settings file is too large (maximum 1 MiB).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::InvalidJson(error) => Some(error),
+            Self::Validation(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for SettingsError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsStore {
+    path: PathBuf,
+}
+
+impl SettingsStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn from_default_location() -> Result<Self, SettingsError> {
+        Ok(Self::new(default_settings_path()?))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn list(&self) -> Result<Vec<FavoriteKey>, SettingsError> {
+        Ok(self.read_document()?.favorites)
+    }
+
+    pub fn toggle(&self, favorite: FavoriteKey) -> Result<Vec<FavoriteKey>, SettingsError> {
+        validate_variable_name(&favorite.name).map_err(SettingsError::Validation)?;
+        let mut document = self.read_document()?;
+        if let Some(index) = document.favorites.iter().position(|existing| {
+            existing.scope == favorite.scope && variable_names_equal(&existing.name, &favorite.name)
+        }) {
+            document.favorites.remove(index);
+        } else {
+            document.favorites.push(favorite);
+        }
+        sort_favorites(&mut document.favorites);
+        self.write_document(&document)?;
+        Ok(document.favorites)
+    }
+
+    pub fn reconcile(
+        &self,
+        user_variables: &[EnvironmentVariable],
+        system_variables: &[EnvironmentVariable],
+    ) -> Result<Vec<FavoriteKey>, SettingsError> {
+        let document = self.read_document()?;
+        let mut favorites = document
+            .favorites
+            .iter()
+            .filter_map(|favorite| {
+                let variables = match favorite.scope {
+                    EnvironmentScope::User => user_variables,
+                    EnvironmentScope::System => system_variables,
+                };
+                variables
+                    .iter()
+                    .find(|variable| variable_names_equal(&variable.name, &favorite.name))
+                    .map(|variable| FavoriteKey {
+                        scope: favorite.scope,
+                        name: variable.name.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        sort_favorites(&mut favorites);
+
+        if favorites != document.favorites {
+            self.write_document(&SettingsDocument {
+                schema_version: SETTINGS_SCHEMA_VERSION,
+                favorites: favorites.clone(),
+            })?;
+        }
+        Ok(favorites)
+    }
+
+    fn read_document(&self) -> Result<SettingsDocument, SettingsError> {
+        let mut file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(empty_document());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if file.metadata()?.len() > MAX_SETTINGS_SIZE {
+            return Err(SettingsError::FileTooLarge);
+        }
+
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(MAX_SETTINGS_SIZE + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_SETTINGS_SIZE {
+            return Err(SettingsError::FileTooLarge);
+        }
+
+        let mut document = serde_json::from_slice::<SettingsDocument>(&bytes)
+            .map_err(SettingsError::InvalidJson)?;
+        validate_document(&document)?;
+        sort_favorites(&mut document.favorites);
+        Ok(document)
+    }
+
+    fn write_document(&self, document: &SettingsDocument) -> Result<(), SettingsError> {
+        let bytes = serde_json::to_vec_pretty(document).map_err(SettingsError::InvalidJson)?;
+        if let Some(directory) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(directory)?;
+        }
+        write_bytes_atomically(&self.path, &bytes)?;
+        Ok(())
+    }
+}
+
+fn empty_document() -> SettingsDocument {
+    SettingsDocument {
+        schema_version: SETTINGS_SCHEMA_VERSION,
+        favorites: Vec::new(),
+    }
+}
+
+fn validate_document(document: &SettingsDocument) -> Result<(), SettingsError> {
+    if document.schema_version != SETTINGS_SCHEMA_VERSION {
+        return Err(SettingsError::UnsupportedSchema(document.schema_version));
+    }
+    for (index, favorite) in document.favorites.iter().enumerate() {
+        validate_variable_name(&favorite.name).map_err(SettingsError::Validation)?;
+        if document.favorites[..index].iter().any(|existing| {
+            existing.scope == favorite.scope && variable_names_equal(&existing.name, &favorite.name)
+        }) {
+            return Err(SettingsError::DuplicateFavorite);
+        }
+    }
+    Ok(())
+}
+
+fn sort_favorites(favorites: &mut [FavoriteKey]) {
+    favorites.sort_by(|left, right| {
+        scope_order(left.scope)
+            .cmp(&scope_order(right.scope))
+            .then_with(|| compare_variable_names(&left.name, &right.name))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
+fn scope_order(scope: EnvironmentScope) -> u8 {
+    match scope {
+        EnvironmentScope::User => 0,
+        EnvironmentScope::System => 1,
+    }
+}
+
+fn default_settings_path() -> Result<PathBuf, SettingsError> {
+    #[cfg(windows)]
+    {
+        let app_data = env::var_os("APPDATA").ok_or(SettingsError::PathUnavailable)?;
+        return Ok(PathBuf::from(app_data)
+            .join("EnvManager")
+            .join("settings.json"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let home = env::var_os("HOME").ok_or(SettingsError::PathUnavailable)?;
+        Ok(PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("env-manager")
+            .join("settings.json"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FavoriteKey, SettingsStore};
@@ -52,12 +301,8 @@ mod tests {
             ]
         );
 
-        store
-            .toggle(favorite(EnvironmentScope::User, "Σ"))
-            .unwrap();
-        let favorites = store
-            .toggle(favorite(EnvironmentScope::User, "ς"))
-            .unwrap();
+        store.toggle(favorite(EnvironmentScope::User, "Σ")).unwrap();
+        let favorites = store.toggle(favorite(EnvironmentScope::User, "ς")).unwrap();
         if compare_variable_names("Σ", "ς") == Ordering::Equal {
             assert!(!favorites.contains(&favorite(EnvironmentScope::User, "Σ")));
             assert!(!favorites.contains(&favorite(EnvironmentScope::User, "ς")));
@@ -78,11 +323,7 @@ mod tests {
 
         store
             .reconcile(
-                &[variable(
-                    EnvironmentScope::User,
-                    "API_TOKEN",
-                    SECRET_VALUE,
-                )],
+                &[variable(EnvironmentScope::User, "API_TOKEN", SECRET_VALUE)],
                 &[],
             )
             .unwrap();
@@ -136,9 +377,11 @@ mod tests {
         expected.sort_by(compare_favorites);
 
         assert_eq!(actual, expected);
-        assert!(actual[..4]
-            .iter()
-            .all(|favorite| favorite.scope == EnvironmentScope::User));
+        assert!(
+            actual[..4]
+                .iter()
+                .all(|favorite| favorite.scope == EnvironmentScope::User)
+        );
     }
 
     #[test]
@@ -156,10 +399,7 @@ mod tests {
             }),
         );
 
-        assert_error_contains(
-            SettingsStore::new(path).list(),
-            &["duplicate", "favorite"],
-        );
+        assert_error_contains(SettingsStore::new(path).list(), &["duplicate", "favorite"]);
     }
 
     #[test]
@@ -211,7 +451,8 @@ mod tests {
     fn invalid_favorites_loaded_from_disk_are_rejected_without_overwrite() {
         let directory = TempDirectory::new("invalid-on-disk");
         let path = directory.path().join("settings.json");
-        let original = br#"{"schemaVersion":1,"favorites":[{"scope":"user","name":"BAD\u0000NAME"}]}"#;
+        let original =
+            br#"{"schemaVersion":1,"favorites":[{"scope":"user","name":"BAD\u0000NAME"}]}"#;
         std::fs::write(&path, original).unwrap();
         let store = SettingsStore::new(path.clone());
 
@@ -267,11 +508,7 @@ mod tests {
 
         let favorites = store
             .reconcile(
-                &[variable(
-                    EnvironmentScope::User,
-                    "JAVA_HOME",
-                    r"C:\Java",
-                )],
+                &[variable(EnvironmentScope::User, "JAVA_HOME", r"C:\Java")],
                 &[],
             )
             .unwrap();

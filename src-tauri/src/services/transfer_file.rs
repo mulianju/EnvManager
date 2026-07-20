@@ -240,7 +240,7 @@ pub fn write_export_file(
         }
     }
     let bytes = serialize_export(request.format, variables)?;
-    atomic_write(&request.path, &bytes)?;
+    write_bytes_atomically(&request.path, &bytes)?;
     Ok(ExportSummary {
         path: request.path.clone(),
         variable_count: variables.len(),
@@ -870,7 +870,7 @@ fn value_type_order(value_type: EnvironmentValueType) -> u8 {
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), TransferFileError> {
+pub(crate) fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let directory = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -900,14 +900,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), TransferFileError> {
                 break;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         }
     }
     let (temporary_path, mut file) = temporary.ok_or_else(|| {
-        TransferFileError::Io(io::Error::new(
+        io::Error::new(
             io::ErrorKind::AlreadyExists,
             "Could not allocate a unique temporary export file.",
-        ))
+        )
     })?;
     let result = (|| {
         file.write_all(bytes)?;
@@ -918,7 +918,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), TransferFileError> {
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
     }
-    result.map_err(TransferFileError::Io)
+    result
 }
 
 #[cfg(windows)]

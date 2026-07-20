@@ -1,7 +1,8 @@
 use crate::domain::environment::{EnvironmentScope, EnvironmentVariableInput};
 use crate::platform::{EnvironmentStoreError, restart_as_administrator};
 use crate::services::environment::{
-    EnvironmentService, EnvironmentServiceError, EnvironmentSnapshot, PathEntryStatus,
+    EnvironmentService, EnvironmentServiceError, EnvironmentSnapshot, MutationResult,
+    PathEntryStatus,
 };
 use serde::Serialize;
 use std::sync::{Mutex, MutexGuard};
@@ -30,6 +31,9 @@ impl From<EnvironmentServiceError> for ApiError {
             EnvironmentServiceError::ElevationRequired => "elevationRequired",
             EnvironmentServiceError::VariableAlreadyExists(_) => "variableAlreadyExists",
             EnvironmentServiceError::VariableNotFound(_) => "variableNotFound",
+            EnvironmentServiceError::InvalidTransfer(_) => "invalidTransfer",
+            EnvironmentServiceError::UndoInvalid(_) => "invalidUndo",
+            EnvironmentServiceError::TransactionRollbackFailed(_) => "transactionRollbackFailed",
             EnvironmentServiceError::Store(EnvironmentStoreError::AccessDenied) => {
                 "elevationRequired"
             }
@@ -63,7 +67,7 @@ pub fn get_environment_snapshot(
 pub fn save_environment_variable(
     input: EnvironmentVariableInput,
     state: State<'_, AppState>,
-) -> Result<EnvironmentSnapshot, ApiError> {
+) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
         .set_variable(input)
         .map_err(ApiError::from)
@@ -74,7 +78,7 @@ pub fn delete_environment_variable(
     scope: EnvironmentScope,
     name: String,
     state: State<'_, AppState>,
-) -> Result<EnvironmentSnapshot, ApiError> {
+) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
         .delete_variable(scope, &name)
         .map_err(ApiError::from)
@@ -84,7 +88,7 @@ pub fn delete_environment_variable(
 pub fn restore_environment_backup(
     backup_id: String,
     state: State<'_, AppState>,
-) -> Result<EnvironmentSnapshot, ApiError> {
+) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
         .restore_backup(&backup_id)
         .map_err(ApiError::from)

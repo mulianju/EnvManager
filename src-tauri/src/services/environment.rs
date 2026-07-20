@@ -1,9 +1,9 @@
 use crate::domain::environment::{
     EnvironmentScope, EnvironmentValidationError, EnvironmentVariable, EnvironmentVariableInput,
-    duplicate_path_entry_indexes, variable_names_equal,
+    TransferMode, TransferVariableInput, duplicate_path_entry_indexes, variable_names_equal,
 };
 use crate::platform::{EnvironmentStore, EnvironmentStoreError};
-use crate::services::backup::{BackupError, BackupStore, BackupSummary};
+use crate::services::backup::{BackupDocument, BackupError, BackupStore, BackupSummary};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -21,6 +21,13 @@ pub struct EnvironmentSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MutationResult {
+    pub snapshot: EnvironmentSnapshot,
+    pub undo_backup_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PathEntryStatus {
     pub value: String,
     pub expanded_value: String,
@@ -34,6 +41,9 @@ pub enum EnvironmentServiceError {
     ElevationRequired,
     VariableAlreadyExists(String),
     VariableNotFound(String),
+    InvalidTransfer(String),
+    UndoInvalid(String),
+    TransactionRollbackFailed(String),
     Store(EnvironmentStoreError),
     Backup(BackupError),
 }
@@ -50,6 +60,14 @@ impl fmt::Display for EnvironmentServiceError {
             }
             Self::VariableNotFound(name) => {
                 write!(formatter, "Environment variable {name} was not found.")
+            }
+            Self::InvalidTransfer(message) => write!(formatter, "Invalid transfer: {message}"),
+            Self::UndoInvalid(message) => write!(formatter, "Invalid undo request: {message}"),
+            Self::TransactionRollbackFailed(message) => {
+                write!(
+                    formatter,
+                    "Environment transaction rollback failed: {message}"
+                )
             }
             Self::Store(error) => error.fmt(formatter),
             Self::Backup(error) => error.fmt(formatter),
@@ -100,7 +118,7 @@ impl EnvironmentService {
     pub fn set_variable(
         &self,
         input: EnvironmentVariableInput,
-    ) -> Result<EnvironmentSnapshot, EnvironmentServiceError> {
+    ) -> Result<MutationResult, EnvironmentServiceError> {
         input.validate()?;
         self.require_scope_permission(input.scope)?;
         let current = self.store.list(input.scope)?;
@@ -120,17 +138,17 @@ impl EnvironmentService {
             }
         }
 
-        self.backups.create(input.scope, "beforeSet", current)?;
+        let backup = self.backups.create(input.scope, "beforeSet", current)?;
         self.store.set(&input)?;
         self.store.broadcast_change()?;
-        self.snapshot()
+        self.mutation_result(vec![backup.id])
     }
 
     pub fn delete_variable(
         &self,
         scope: EnvironmentScope,
         name: &str,
-    ) -> Result<EnvironmentSnapshot, EnvironmentServiceError> {
+    ) -> Result<MutationResult, EnvironmentServiceError> {
         crate::domain::environment::validate_variable_name(name)?;
         self.require_scope_permission(scope)?;
         let current = self.store.list(scope)?;
@@ -141,45 +159,180 @@ impl EnvironmentService {
             return Err(EnvironmentServiceError::VariableNotFound(name.to_owned()));
         }
 
-        self.backups.create(scope, "beforeDelete", current)?;
+        let backup = self.backups.create(scope, "beforeDelete", current)?;
         self.store.delete(scope, name)?;
         self.store.broadcast_change()?;
-        self.snapshot()
+        self.mutation_result(vec![backup.id])
     }
 
     pub fn restore_backup(
         &self,
         backup_id: &str,
-    ) -> Result<EnvironmentSnapshot, EnvironmentServiceError> {
+    ) -> Result<MutationResult, EnvironmentServiceError> {
         let backup = self.backups.load(backup_id)?;
         self.require_scope_permission(backup.scope)?;
         let current = self.store.list(backup.scope)?;
-        self.backups
+        let rollback = self
+            .backups
             .create(backup.scope, "beforeRestore", current.clone())?;
 
-        let backup_names = backup
-            .variables
-            .iter()
-            .map(|variable| variable.name.to_ascii_lowercase())
-            .collect::<HashSet<_>>();
-        for variable in &current {
-            if !backup_names.contains(&variable.name.to_ascii_lowercase()) {
-                self.store.delete(backup.scope, &variable.name)?;
-            }
-        }
-
-        for variable in backup.variables {
-            self.store.set(&EnvironmentVariableInput {
-                original_name: Some(variable.name.clone()),
-                name: variable.name,
-                value: variable.value,
-                value_type: variable.value_type,
-                scope: variable.scope,
-            })?;
+        if let Err(error) = self.restore_document(&backup) {
+            return match self.restore_scope(backup.scope, &current) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(EnvironmentServiceError::TransactionRollbackFailed(
+                    format!("{error}; rollback error: {rollback_error}"),
+                )),
+            };
         }
 
         self.store.broadcast_change()?;
-        self.snapshot()
+        self.mutation_result(vec![rollback.id])
+    }
+
+    pub fn undo_mutation(
+        &self,
+        backup_ids: &[String],
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        if backup_ids.is_empty() {
+            return Err(EnvironmentServiceError::UndoInvalid(
+                "At least one backup is required.".to_owned(),
+            ));
+        }
+
+        let backups = backup_ids
+            .iter()
+            .map(|id| self.backups.load(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut scopes = HashSet::new();
+        if let Some(duplicate) = backups
+            .iter()
+            .map(|backup| backup.scope)
+            .find(|scope| !scopes.insert(*scope))
+        {
+            return Err(EnvironmentServiceError::UndoInvalid(format!(
+                "Only one backup can be restored for the {duplicate:?} scope."
+            )));
+        }
+        for backup in &backups {
+            self.require_scope_permission(backup.scope)?;
+        }
+
+        let mut rollback_documents = Vec::with_capacity(backups.len());
+        let mut rollback_ids = Vec::with_capacity(backups.len());
+        for backup in &backups {
+            let variables = self.store.list(backup.scope)?;
+            let summary = self
+                .backups
+                .create(backup.scope, "beforeUndo", variables.clone())?;
+            rollback_ids.push(summary.id.clone());
+            rollback_documents.push(BackupDocument {
+                schema_version: backup.schema_version,
+                id: summary.id,
+                created_at_ms: summary.created_at_ms,
+                scope: backup.scope,
+                reason: "beforeUndo".to_owned(),
+                variables,
+            });
+        }
+
+        for (index, backup) in backups.iter().enumerate() {
+            if let Err(error) = self.restore_document(backup) {
+                let mut rollback_error = None;
+                for document in rollback_documents[..=index].iter().rev() {
+                    if let Err(error) = self.restore_document(document) {
+                        rollback_error.get_or_insert(error);
+                    }
+                }
+                return match rollback_error {
+                    Some(rollback_error) => {
+                        Err(EnvironmentServiceError::TransactionRollbackFailed(format!(
+                            "{error}; rollback error: {rollback_error}"
+                        )))
+                    }
+                    None => Err(error),
+                };
+            }
+        }
+
+        self.store.broadcast_change()?;
+        self.mutation_result(rollback_ids)
+    }
+
+    pub fn transfer_variable(
+        &self,
+        input: TransferVariableInput,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        input.validate()?;
+        if input.source_scope == input.target_scope {
+            return Err(EnvironmentServiceError::InvalidTransfer(
+                "Source and target scopes must be different.".to_owned(),
+            ));
+        }
+
+        self.require_scope_permission(input.target_scope)?;
+        if input.mode == TransferMode::Move {
+            self.require_scope_permission(input.source_scope)?;
+        }
+
+        let source_variables = self.store.list(input.source_scope)?;
+        let target_variables = self.store.list(input.target_scope)?;
+        let source = source_variables
+            .iter()
+            .find(|variable| variable_names_equal(&variable.name, &input.name))
+            .ok_or_else(|| EnvironmentServiceError::VariableNotFound(input.name.clone()))?;
+        let destination = target_variables
+            .iter()
+            .find(|variable| variable_names_equal(&variable.name, &input.name));
+        if let Some(destination) = destination {
+            if !input.overwrite {
+                return Err(EnvironmentServiceError::VariableAlreadyExists(
+                    destination.name.clone(),
+                ));
+            }
+        }
+
+        let target_backup = self.backups.create(
+            input.target_scope,
+            "beforeTransfer",
+            target_variables.clone(),
+        )?;
+        let mut undo_backup_ids = vec![target_backup.id];
+        if input.mode == TransferMode::Move {
+            let source_backup = self.backups.create(
+                input.source_scope,
+                "beforeTransfer",
+                source_variables.clone(),
+            )?;
+            undo_backup_ids.push(source_backup.id);
+        }
+
+        let target_input = EnvironmentVariableInput {
+            original_name: destination.map(|variable| variable.name.clone()),
+            name: source.name.clone(),
+            value: source.value.clone(),
+            value_type: source.value_type,
+            scope: input.target_scope,
+        };
+        if let Err(error) = self.store.set(&target_input) {
+            return self.rollback_transfer_target(
+                error.into(),
+                input.target_scope,
+                &target_variables,
+            );
+        }
+
+        if input.mode == TransferMode::Move {
+            if let Err(error) = self.store.delete(input.source_scope, &source.name) {
+                return self.rollback_transfer_target(
+                    error.into(),
+                    input.target_scope,
+                    &target_variables,
+                );
+            }
+        }
+
+        self.store.broadcast_change()?;
+        self.mutation_result(undo_backup_ids)
     }
 
     pub fn analyze_path_entries(
@@ -222,6 +375,66 @@ impl EnvironmentService {
             return Err(EnvironmentServiceError::ElevationRequired);
         }
         Ok(())
+    }
+
+    fn mutation_result(
+        &self,
+        undo_backup_ids: Vec<String>,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        Ok(MutationResult {
+            snapshot: self.snapshot()?,
+            undo_backup_ids,
+        })
+    }
+
+    fn restore_document(&self, document: &BackupDocument) -> Result<(), EnvironmentServiceError> {
+        self.restore_scope(document.scope, &document.variables)
+    }
+
+    fn restore_scope(
+        &self,
+        scope: EnvironmentScope,
+        variables: &[EnvironmentVariable],
+    ) -> Result<(), EnvironmentServiceError> {
+        let current = self.store.list(scope)?;
+        let target_names = variables
+            .iter()
+            .map(|variable| variable.name.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        for variable in &current {
+            if !target_names.contains(&variable.name.to_ascii_lowercase()) {
+                self.store.delete(scope, &variable.name)?;
+            }
+        }
+
+        for variable in variables {
+            let original_name = current
+                .iter()
+                .find(|current| variable_names_equal(&current.name, &variable.name))
+                .map(|current| current.name.clone());
+            self.store.set(&EnvironmentVariableInput {
+                original_name,
+                name: variable.name.clone(),
+                value: variable.value.clone(),
+                value_type: variable.value_type,
+                scope,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn rollback_transfer_target(
+        &self,
+        error: EnvironmentServiceError,
+        target_scope: EnvironmentScope,
+        target_variables: &[EnvironmentVariable],
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        match self.restore_scope(target_scope, target_variables) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(EnvironmentServiceError::TransactionRollbackFailed(
+                format!("{error}; rollback error: {rollback_error}"),
+            )),
+        }
     }
 }
 
@@ -266,9 +479,7 @@ fn expand_percent_variables_once(value: &str, variables: &HashMap<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::environment::{
-        EnvironmentValueType, TransferMode, TransferVariableInput,
-    };
+    use crate::domain::environment::{EnvironmentValueType, TransferMode, TransferVariableInput};
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -323,12 +534,13 @@ mod tests {
         fn delete(&self, scope: EnvironmentScope, name: &str) -> Result<(), EnvironmentStoreError> {
             let mut state = self.state.lock().unwrap();
             state.delete_calls += 1;
-            let should_fail = state
-                .fail_next_delete
-                .as_ref()
-                .is_some_and(|(failure_scope, failure_name)| {
-                    *failure_scope == scope && variable_names_equal(failure_name, name)
-                });
+            let should_fail =
+                state
+                    .fail_next_delete
+                    .as_ref()
+                    .is_some_and(|(failure_scope, failure_name)| {
+                        *failure_scope == scope && variable_names_equal(failure_name, name)
+                    });
             if should_fail {
                 state.fail_next_delete = None;
                 return Err(EnvironmentStoreError::OperationFailed(
@@ -502,7 +714,10 @@ mod tests {
             .unwrap();
         assert_eq!(backup.scope, EnvironmentScope::User);
         assert_eq!(backup.reason, "beforeDelete");
-        assert_eq!(backup.variables, vec![variable(EnvironmentScope::User, "Path", r"C:\Tools")]);
+        assert_eq!(
+            backup.variables,
+            vec![variable(EnvironmentScope::User, "Path", r"C:\Tools")]
+        );
     }
 
     #[test]
@@ -522,10 +737,7 @@ mod tests {
             .unwrap();
         let selected_backup_id = changed.undo_backup_ids[0].clone();
 
-        let restored = harness
-            .service
-            .restore_backup(&selected_backup_id)
-            .unwrap();
+        let restored = harness.service.restore_backup(&selected_backup_id).unwrap();
 
         assert_eq!(restored.undo_backup_ids.len(), 1);
         assert_ne!(restored.undo_backup_ids[0], selected_backup_id);
@@ -686,7 +898,11 @@ mod tests {
         seed(
             &harness.state,
             EnvironmentScope::System,
-            vec![variable(EnvironmentScope::System, "JAVA_HOME", "destination")],
+            vec![variable(
+                EnvironmentScope::System,
+                "JAVA_HOME",
+                "destination",
+            )],
         );
 
         let result = harness.service.transfer_variable(transfer(
@@ -723,7 +939,11 @@ mod tests {
         seed(
             &harness.state,
             EnvironmentScope::System,
-            vec![variable(EnvironmentScope::System, "JAVA_HOME", "destination")],
+            vec![variable(
+                EnvironmentScope::System,
+                "JAVA_HOME",
+                "destination",
+            )],
         );
 
         let result = harness
@@ -911,12 +1131,14 @@ mod tests {
         seed(
             &harness.state,
             EnvironmentScope::System,
-            vec![variable(EnvironmentScope::System, "JAVA_HOME", "destination")],
+            vec![variable(
+                EnvironmentScope::System,
+                "JAVA_HOME",
+                "destination",
+            )],
         );
-        harness.state.lock().unwrap().fail_next_delete = Some((
-            EnvironmentScope::User,
-            "java_home".to_owned(),
-        ));
+        harness.state.lock().unwrap().fail_next_delete =
+            Some((EnvironmentScope::User, "java_home".to_owned()));
 
         let result = harness.service.transfer_variable(transfer(
             EnvironmentScope::User,
@@ -951,7 +1173,11 @@ mod tests {
         seed(
             &harness.state,
             EnvironmentScope::User,
-            vec![variable(EnvironmentScope::User, "USER_VALUE", "before-user")],
+            vec![variable(
+                EnvironmentScope::User,
+                "USER_VALUE",
+                "before-user",
+            )],
         );
         seed(
             &harness.state,

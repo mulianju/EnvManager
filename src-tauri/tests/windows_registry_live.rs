@@ -44,6 +44,7 @@ fn writes_reads_and_deletes_a_temporary_user_variable() {
         .unwrap();
     assert!(
         snapshot
+            .snapshot
             .user_variables
             .iter()
             .any(|variable| { variable.name == name && variable.value == "temporary-value" })
@@ -54,6 +55,7 @@ fn writes_reads_and_deletes_a_temporary_user_variable() {
         .unwrap();
     assert!(
         !snapshot
+            .snapshot
             .user_variables
             .iter()
             .any(|variable| variable.name == name)

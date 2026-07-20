@@ -35,6 +35,23 @@ pub struct EnvironmentVariableInput {
     pub scope: EnvironmentScope,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferMode {
+    Copy,
+    Move,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferVariableInput {
+    pub source_scope: EnvironmentScope,
+    pub target_scope: EnvironmentScope,
+    pub name: String,
+    pub mode: TransferMode,
+    pub overwrite: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvironmentValidationError {
     EmptyName,
@@ -62,6 +79,12 @@ impl EnvironmentVariableInput {
     pub fn validate(&self) -> Result<(), EnvironmentValidationError> {
         validate_variable_name(&self.name)?;
         validate_variable_value(&self.value)
+    }
+}
+
+impl TransferVariableInput {
+    pub fn validate(&self) -> Result<(), EnvironmentValidationError> {
+        validate_variable_name(&self.name)
     }
 }
 

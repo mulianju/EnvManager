@@ -5,10 +5,11 @@ use crate::domain::environment::{
 };
 use std::ffi::OsStr;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, SendMessageTimeoutW, WM_SETTINGCHANGE,
@@ -129,21 +130,14 @@ pub fn restart_as_administrator() -> Result<(), EnvironmentStoreError> {
 }
 
 pub fn launch_powershell(environment: &[(String, String)]) -> Result<(), EnvironmentStoreError> {
-    let system_root = environment
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("SystemRoot"))
-        .map(|(_, value)| value.clone())
-        .or_else(|| std::env::var("SystemRoot").ok())
-        .ok_or_else(|| {
-            EnvironmentStoreError::OperationFailed(
-                "Unable to locate Windows PowerShell because SystemRoot is unavailable.".to_owned(),
-            )
-        })?;
-    let executable = Path::new(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
+    let windows_directory = windows_directory()?;
+    let executable = powershell_path_from_windows_directory(&windows_directory)?;
+    if !executable.is_file() {
+        return Err(EnvironmentStoreError::OperationFailed(format!(
+            "Windows PowerShell was not found at {}.",
+            executable.display()
+        )));
+    }
 
     Command::new(&executable)
         .arg("-NoLogo")
@@ -158,6 +152,42 @@ pub fn launch_powershell(environment: &[(String, String)]) -> Result<(), Environ
             ))
         })?;
     Ok(())
+}
+
+fn windows_directory() -> Result<PathBuf, EnvironmentStoreError> {
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let length = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 {
+            return Err(EnvironmentStoreError::OperationFailed(format!(
+                "Unable to locate the Windows directory: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        if length as usize >= buffer.len() {
+            buffer.resize(length as usize + 1, 0);
+            continue;
+        }
+        return Ok(PathBuf::from(std::ffi::OsString::from_wide(
+            &buffer[..length as usize],
+        )));
+    }
+}
+
+fn powershell_path_from_windows_directory(
+    windows_directory: &Path,
+) -> Result<PathBuf, EnvironmentStoreError> {
+    if !windows_directory.is_absolute() {
+        return Err(EnvironmentStoreError::OperationFailed(format!(
+            "Windows returned a non-absolute Windows directory: {}.",
+            windows_directory.display()
+        )));
+    }
+    Ok(windows_directory
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe"))
 }
 
 fn open_key(
@@ -207,5 +237,23 @@ mod tests {
 
         store.list(EnvironmentScope::User).unwrap();
         store.list(EnvironmentScope::System).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_relative_windows_directory_for_powershell() {
+        let error = powershell_path_from_windows_directory(Path::new("Windows")).unwrap_err();
+
+        assert!(error.to_string().contains("non-absolute"));
+    }
+
+    #[test]
+    fn builds_an_absolute_powershell_path_from_the_windows_directory() {
+        let executable = powershell_path_from_windows_directory(Path::new(r"C:\Windows")).unwrap();
+
+        assert_eq!(
+            executable,
+            PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        );
+        assert!(executable.is_absolute());
     }
 }

@@ -645,7 +645,7 @@ pub fn compose_process_environment(
     system: &[EnvironmentVariable],
 ) -> Vec<(String, String)> {
     let mut composed = HashMap::<String, (String, String)>::new();
-    for (name, value) in base {
+    for (name, value) in base.iter().filter(|(name, _)| !is_path_variable(name)) {
         composed.insert(name.to_ascii_lowercase(), (name.clone(), value.clone()));
     }
     for variable in system
@@ -1229,6 +1229,23 @@ mod tests {
         assert_eq!(
             composed[0],
             ("tool_home".to_owned(), "user-tool".to_owned())
+        );
+    }
+
+    #[test]
+    fn process_environment_drops_stale_base_path_without_registry_path() {
+        let base = vec![
+            ("Path".to_owned(), r"C:\StaleBase".to_owned()),
+            ("KEEP".to_owned(), "value".to_owned()),
+        ];
+
+        let composed = compose_process_environment(&base, &[], &[]);
+
+        assert!(composed.iter().all(|(name, _)| !is_path_variable(name)));
+        assert!(
+            composed
+                .iter()
+                .any(|(name, value)| { variable_names_equal(name, "KEEP") && value == "value" })
         );
     }
 

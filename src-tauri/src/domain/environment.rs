@@ -106,7 +106,11 @@ pub fn validate_variable_value(value: &str) -> Result<(), EnvironmentValidationE
 }
 
 pub fn variable_names_equal(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
+    normalize_variable_name(left) == normalize_variable_name(right)
+}
+
+pub fn normalize_variable_name(name: &str) -> String {
+    name.to_lowercase()
 }
 
 pub fn is_path_variable(name: &str) -> bool {
@@ -177,6 +181,7 @@ mod tests {
     #[test]
     fn compares_variable_names_case_insensitively() {
         assert!(variable_names_equal("Path", "PATH"));
+        assert!(variable_names_equal("ÄPFEL", "äpfel"));
         assert!(!variable_names_equal("JAVA_HOME", "JDK_HOME"));
     }
 

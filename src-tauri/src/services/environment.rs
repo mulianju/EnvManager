@@ -1,13 +1,15 @@
 use crate::domain::environment::{
     EnvironmentScope, EnvironmentValidationError, EnvironmentValueType, EnvironmentVariable,
     EnvironmentVariableInput, TransferMode, TransferVariableInput, duplicate_path_entry_indexes,
-    is_path_variable, join_path_entries, parse_path_entries, variable_names_equal,
+    is_path_variable, join_path_entries, normalize_variable_name, parse_path_entries,
+    variable_names_equal,
 };
 use crate::platform::{EnvironmentStore, EnvironmentStoreError};
 use crate::services::backup::{BackupDocument, BackupError, BackupStore, BackupSummary};
 use crate::services::transfer_file::{
     ExportFileRequest, ExportSummary, ImportAction, ImportConflictStrategy, ImportFileRequest,
-    ImportPreview, ImportPreviewItem, TransferFileError, read_import_file, write_export_file,
+    ImportPreview, ImportPreviewItem, TransferFileError, import_token, read_import_file,
+    write_export_file,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -68,6 +70,7 @@ pub enum EnvironmentServiceError {
     VariableAlreadyExists(String),
     VariableNotFound(String),
     InvalidTransfer(String),
+    ImportPreviewChanged,
     UndoInvalid(String),
     TransactionRollbackFailed(String),
     Store(EnvironmentStoreError),
@@ -89,6 +92,9 @@ impl fmt::Display for EnvironmentServiceError {
                 write!(formatter, "Environment variable {name} was not found.")
             }
             Self::InvalidTransfer(message) => write!(formatter, "Invalid transfer: {message}"),
+            Self::ImportPreviewChanged => formatter.write_str(
+                "The import file changed after preview. Preview the file again before importing.",
+            ),
             Self::UndoInvalid(message) => write!(formatter, "Invalid undo request: {message}"),
             Self::TransactionRollbackFailed(message) => {
                 write!(
@@ -178,8 +184,12 @@ impl EnvironmentService {
         &self,
         request: &ImportFileRequest,
         strategy: ImportConflictStrategy,
+        expected_token: &str,
     ) -> Result<MutationResult, EnvironmentServiceError> {
         let variables = read_import_file(request)?;
+        if !is_valid_import_token(expected_token) || import_token(&variables) != expected_token {
+            return Err(EnvironmentServiceError::ImportPreviewChanged);
+        }
         if variables.is_empty() {
             return Err(EnvironmentServiceError::InvalidTransfer(
                 "Import file does not contain any variables.".to_owned(),
@@ -468,7 +478,7 @@ impl EnvironmentService {
         let variables = system
             .into_iter()
             .chain(user)
-            .map(|variable| (variable.name.to_ascii_lowercase(), variable.value))
+            .map(|variable| (normalize_variable_name(&variable.name), variable.value))
             .collect::<HashMap<_, _>>();
         let duplicates = duplicate_path_entry_indexes(entries)
             .into_iter()
@@ -505,6 +515,7 @@ impl EnvironmentService {
         &self,
         variables: Vec<EnvironmentVariable>,
     ) -> Result<ImportPreview, EnvironmentServiceError> {
+        let token = import_token(&variables);
         let needs_user = variables
             .iter()
             .any(|variable| variable.scope == EnvironmentScope::User);
@@ -549,7 +560,7 @@ impl EnvironmentService {
                 }
             })
             .collect();
-        Ok(ImportPreview { items })
+        Ok(ImportPreview { token, items })
     }
 
     fn finalize_transaction(
@@ -587,10 +598,10 @@ impl EnvironmentService {
         let current = self.store.list(scope)?;
         let target_names = variables
             .iter()
-            .map(|variable| variable.name.to_ascii_lowercase())
+            .map(|variable| normalize_variable_name(&variable.name))
             .collect::<HashSet<_>>();
         for variable in &current {
-            if !target_names.contains(&variable.name.to_ascii_lowercase()) {
+            if !target_names.contains(&normalize_variable_name(&variable.name)) {
                 self.store.delete(scope, &variable.name)?;
             }
         }
@@ -637,11 +648,11 @@ pub fn build_effective_variables(
 ) -> Vec<EffectiveEnvironmentVariable> {
     let user_by_name = user
         .iter()
-        .map(|variable| (variable.name.to_ascii_lowercase(), variable))
+        .map(|variable| (normalize_variable_name(&variable.name), variable))
         .collect::<HashMap<_, _>>();
     let system_by_name = system
         .iter()
-        .map(|variable| (variable.name.to_ascii_lowercase(), variable))
+        .map(|variable| (normalize_variable_name(&variable.name), variable))
         .collect::<HashMap<_, _>>();
     let names = user_by_name
         .keys()
@@ -715,9 +726,8 @@ pub fn build_effective_variables(
         })
         .collect::<Vec<_>>();
     effective.sort_by(|left, right| {
-        left.name
-            .to_ascii_lowercase()
-            .cmp(&right.name.to_ascii_lowercase())
+        normalize_variable_name(&left.name)
+            .cmp(&normalize_variable_name(&right.name))
             .then_with(|| left.name.cmp(&right.name))
     });
     effective
@@ -754,9 +764,7 @@ pub fn environment_revision(
         scope_order(*left_scope)
             .cmp(&scope_order(*right_scope))
             .then_with(|| {
-                left.name
-                    .to_ascii_lowercase()
-                    .cmp(&right.name.to_ascii_lowercase())
+                normalize_variable_name(&left.name).cmp(&normalize_variable_name(&right.name))
             })
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| {
@@ -768,7 +776,10 @@ pub fn environment_revision(
     let mut hash = 0xcbf29ce484222325u64;
     for (scope, variable) in records {
         hash_revision_field(&mut hash, &[scope_order(scope)]);
-        hash_revision_field(&mut hash, variable.name.to_ascii_lowercase().as_bytes());
+        hash_revision_field(
+            &mut hash,
+            normalize_variable_name(&variable.name).as_bytes(),
+        );
         hash_revision_field(&mut hash, variable.name.as_bytes());
         hash_revision_field(&mut hash, &[value_type_order(variable.value_type)]);
         hash_revision_field(&mut hash, variable.value.as_bytes());
@@ -790,6 +801,10 @@ fn value_type_order(value_type: EnvironmentValueType) -> u8 {
     }
 }
 
+fn is_valid_import_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn hash_revision_field(hash: &mut u64, value: &[u8]) {
     for byte in (value.len() as u64).to_le_bytes().iter().chain(value) {
         *hash ^= u64::from(*byte);
@@ -805,7 +820,7 @@ pub fn compose_process_environment(
     let mut composed = HashMap::<String, (String, String, bool)>::new();
     for (name, value) in base.iter().filter(|(name, _)| !is_path_variable(name)) {
         composed.insert(
-            name.to_ascii_lowercase(),
+            normalize_variable_name(name),
             (name.clone(), value.clone(), false),
         );
     }
@@ -814,7 +829,7 @@ pub fn compose_process_environment(
         .filter(|variable| !is_path_variable(&variable.name))
     {
         composed.insert(
-            variable.name.to_ascii_lowercase(),
+            normalize_variable_name(&variable.name),
             (
                 variable.name.clone(),
                 variable.value.clone(),
@@ -827,7 +842,7 @@ pub fn compose_process_environment(
         .filter(|variable| !is_path_variable(&variable.name))
     {
         composed.insert(
-            variable.name.to_ascii_lowercase(),
+            normalize_variable_name(&variable.name),
             (
                 variable.name.clone(),
                 variable.value.clone(),
@@ -896,8 +911,8 @@ pub fn compose_process_environment(
         })
         .collect::<Vec<_>>();
     result.sort_by(|(left, _), (right, _)| {
-        left.to_ascii_lowercase()
-            .cmp(&right.to_ascii_lowercase())
+        normalize_variable_name(left)
+            .cmp(&normalize_variable_name(right))
             .then_with(|| left.cmp(right))
     });
     result
@@ -941,7 +956,7 @@ fn expand_percent_variables_once(value: &str, variables: &HashMap<String, String
         };
         let end = start + 1 + relative_end;
         let name = &value[start + 1..end];
-        if let Some(replacement) = variables.get(&name.to_ascii_lowercase()) {
+        if let Some(replacement) = variables.get(&normalize_variable_name(name)) {
             output.push_str(replacement);
         } else {
             output.push_str(&value[start..=end]);
@@ -1262,6 +1277,15 @@ mod tests {
             .iter()
             .find(|item| variable_names_equal(&item.variable.name, name))
             .unwrap()
+    }
+
+    fn apply_previewed_import(
+        service: &EnvironmentService,
+        request: &ImportFileRequest,
+        strategy: ImportConflictStrategy,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        let token = service.preview_import(request)?.token;
+        service.apply_import(request, strategy, &token)
     }
 
     #[test]
@@ -2373,6 +2397,25 @@ mod tests {
     }
 
     #[test]
+    fn import_preview_matches_unicode_variable_names() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "ÄPFEL", "before")],
+        );
+        let incoming = vec![variable(EnvironmentScope::User, "äpfel", "after")];
+        let file = TestFile::new("unicode-preview", "json", &json_import(&incoming));
+        let request = file.import_request(TransferFileFormat::Json, None);
+
+        let preview = harness.service.preview_import(&request).unwrap();
+        let item = find_preview_item(&preview, "ÄPFEL");
+
+        assert_eq!(item.action, ImportAction::Update);
+        assert_eq!(item.existing.as_ref().unwrap().name, "ÄPFEL");
+    }
+
+    #[test]
     fn import_skip_existing_only_creates_missing_variables() {
         let harness = service(false);
         seed(
@@ -2390,10 +2433,12 @@ mod tests {
         );
         let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
 
-        let result = harness
-            .service
-            .apply_import(&request, ImportConflictStrategy::SkipExisting)
-            .unwrap();
+        let result = apply_previewed_import(
+            &harness.service,
+            &request,
+            ImportConflictStrategy::SkipExisting,
+        )
+        .unwrap();
 
         assert_variable(
             &result.snapshot,
@@ -2440,10 +2485,12 @@ mod tests {
         );
         let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
 
-        let result = harness
-            .service
-            .apply_import(&request, ImportConflictStrategy::Overwrite)
-            .unwrap();
+        let result = apply_previewed_import(
+            &harness.service,
+            &request,
+            ImportConflictStrategy::Overwrite,
+        )
+        .unwrap();
 
         assert_variable(
             &result.snapshot,
@@ -2472,9 +2519,11 @@ mod tests {
         let file = TestFile::new("permission", "json", &json_import(&variables));
         let request = file.import_request(TransferFileFormat::Json, None);
 
-        let result = harness
-            .service
-            .apply_import(&request, ImportConflictStrategy::Overwrite);
+        let result = apply_previewed_import(
+            &harness.service,
+            &request,
+            ImportConflictStrategy::Overwrite,
+        );
 
         assert!(matches!(
             result,
@@ -2515,10 +2564,12 @@ mod tests {
         let file = TestFile::new("mixed-success", "json", &json_import(&variables));
         let request = file.import_request(TransferFileFormat::Json, None);
 
-        let result = harness
-            .service
-            .apply_import(&request, ImportConflictStrategy::Overwrite)
-            .unwrap();
+        let result = apply_previewed_import(
+            &harness.service,
+            &request,
+            ImportConflictStrategy::Overwrite,
+        )
+        .unwrap();
 
         assert_eq!(result.undo_backup_ids.len(), 2);
         assert_variable(
@@ -2597,9 +2648,11 @@ mod tests {
         harness.state.lock().unwrap().fail_next_set =
             Some((EnvironmentScope::System, "SYSTEM_VALUE".to_owned()));
 
-        let result = harness
-            .service
-            .apply_import(&request, ImportConflictStrategy::Overwrite);
+        let result = apply_previewed_import(
+            &harness.service,
+            &request,
+            ImportConflictStrategy::Overwrite,
+        );
 
         assert!(matches!(result, Err(EnvironmentServiceError::Store(_))));
         let state = harness.state.lock().unwrap();
@@ -2629,10 +2682,12 @@ mod tests {
         let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
 
         assert!(
-            harness
-                .service
-                .apply_import(&request, ImportConflictStrategy::Overwrite)
-                .is_err()
+            apply_previewed_import(
+                &harness.service,
+                &request,
+                ImportConflictStrategy::Overwrite,
+            )
+            .is_err()
         );
         let state = harness.state.lock().unwrap();
         assert_eq!(state.set_calls, 0);
@@ -2641,7 +2696,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_import_reloads_a_file_that_changed_after_preview() {
+    fn apply_import_rejects_a_file_that_changed_after_preview() {
         let harness = service(false);
         let file = TestFile::new("reload", "env", b"VALUE=preview\n");
         let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
@@ -2652,12 +2707,52 @@ mod tests {
         );
         std::fs::write(&file.path, b"VALUE=latest\n").unwrap();
 
+        let result = harness.service.apply_import(
+            &request,
+            ImportConflictStrategy::Overwrite,
+            &preview.token,
+        );
+
+        assert!(matches!(
+            result,
+            Err(EnvironmentServiceError::ImportPreviewChanged)
+        ));
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 0);
+        assert_eq!(state.broadcasts, 0);
+        drop(state);
+        assert!(!harness.directory.exists());
+
+        let latest = harness.service.preview_import(&request).unwrap();
         let result = harness
             .service
-            .apply_import(&request, ImportConflictStrategy::Overwrite)
+            .apply_import(&request, ImportConflictStrategy::Overwrite, &latest.token)
             .unwrap();
 
         assert_variable(&result.snapshot, EnvironmentScope::User, "VALUE", "latest");
+    }
+
+    #[test]
+    fn apply_import_rejects_missing_or_malformed_preview_tokens_without_side_effects() {
+        let harness = service(false);
+        let file = TestFile::new("invalid-token", "env", b"VALUE=latest\n");
+        let request =
+            file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::System));
+
+        let non_hex_token = "g".repeat(64);
+        for token in ["", "not-a-token", non_hex_token.as_str()] {
+            assert!(matches!(
+                harness
+                    .service
+                    .apply_import(&request, ImportConflictStrategy::Overwrite, token,),
+                Err(EnvironmentServiceError::ImportPreviewChanged)
+            ));
+        }
+
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 0);
+        assert_eq!(state.broadcasts, 0);
+        assert!(!harness.directory.exists());
     }
 
     #[test]

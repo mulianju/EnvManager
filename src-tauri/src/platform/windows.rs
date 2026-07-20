@@ -1,7 +1,7 @@
 use super::{EnvironmentStore, EnvironmentStoreError};
 use crate::domain::environment::{
     EnvironmentScope, EnvironmentValueType, EnvironmentVariable, EnvironmentVariableInput,
-    variable_names_equal,
+    normalize_variable_name, variable_names_equal,
 };
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -57,7 +57,7 @@ impl EnvironmentStore for WindowsEnvironmentStore {
             });
         }
 
-        variables.sort_by_cached_key(|variable| variable.name.to_ascii_lowercase());
+        variables.sort_by_cached_key(|variable| normalize_variable_name(&variable.name));
         Ok(variables)
     }
 

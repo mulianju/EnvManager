@@ -32,6 +32,7 @@ impl From<EnvironmentServiceError> for ApiError {
             EnvironmentServiceError::VariableAlreadyExists(_) => "variableAlreadyExists",
             EnvironmentServiceError::VariableNotFound(_) => "variableNotFound",
             EnvironmentServiceError::InvalidTransfer(_) => "invalidTransfer",
+            EnvironmentServiceError::ImportPreviewChanged => "importPreviewChanged",
             EnvironmentServiceError::UndoInvalid(_) => "invalidUndo",
             EnvironmentServiceError::TransactionRollbackFailed(_) => "transactionRollbackFailed",
             EnvironmentServiceError::Store(EnvironmentStoreError::AccessDenied) => {

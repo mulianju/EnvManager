@@ -1,12 +1,13 @@
 use crate::domain::environment::{
-    EnvironmentScope, EnvironmentValueType, EnvironmentVariable, validate_variable_name,
-    validate_variable_value,
+    EnvironmentScope, EnvironmentValueType, EnvironmentVariable, normalize_variable_name,
+    validate_variable_name, validate_variable_value,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,6 +66,7 @@ pub struct ImportPreviewItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
+    pub token: String,
     pub items: Vec<ImportPreviewItem>,
 }
 
@@ -147,9 +149,9 @@ pub fn parse_import_bytes(
     default_scope: Option<EnvironmentScope>,
 ) -> Result<Vec<EnvironmentVariable>, TransferFileError> {
     let variables = match format {
-        TransferFileFormat::Json => parse_json(bytes)?,
+        TransferFileFormat::Json => parse_json(strip_utf8_bom(bytes))?,
         TransferFileFormat::DotEnv => parse_dotenv(
-            bytes,
+            strip_utf8_bom(bytes),
             default_scope
                 .ok_or_else(|| TransferFileError::format(format, "A default scope is required."))?,
         )?,
@@ -179,14 +181,52 @@ pub fn serialize_export(
 pub fn read_import_file(
     request: &ImportFileRequest,
 ) -> Result<Vec<EnvironmentVariable>, TransferFileError> {
-    if fs::metadata(&request.path)?.len() > MAX_IMPORT_SIZE {
+    let file = File::open(&request.path)?;
+    if file.metadata()?.len() > MAX_IMPORT_SIZE {
         return Err(TransferFileError::FileTooLarge);
     }
-    let bytes = fs::read(&request.path)?;
+    let bytes = read_bounded(file)?;
+    parse_import_bytes(request.format, &bytes, request.default_scope)
+}
+
+pub fn import_token(variables: &[EnvironmentVariable]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"env-manager-import-v1");
+    for variable in sorted_variables(variables) {
+        hasher.update([scope_order(variable.scope)]);
+        hash_token_field(
+            &mut hasher,
+            normalize_variable_name(&variable.name).as_bytes(),
+        );
+        hash_token_field(&mut hasher, variable.name.as_bytes());
+        hasher.update([value_type_order(variable.value_type)]);
+        hash_token_field(&mut hasher, variable.value.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut token = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut token, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    token
+}
+
+fn hash_token_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn read_bounded(reader: impl Read) -> Result<Vec<u8>, TransferFileError> {
+    let mut bytes = Vec::new();
+    reader.take(MAX_IMPORT_SIZE + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_IMPORT_SIZE {
         return Err(TransferFileError::FileTooLarge);
     }
-    parse_import_bytes(request.format, &bytes, request.default_scope)
+    Ok(bytes)
+}
+
+fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes)
 }
 
 pub fn write_export_file(
@@ -244,14 +284,10 @@ fn parse_dotenv(
         if text.is_empty() || text.starts_with('#') {
             continue;
         }
-        if let Some(rest) = text.strip_prefix("export") {
-            if !rest.starts_with(char::is_whitespace) {
-                return Err(TransferFileError::line(
-                    TransferFileFormat::DotEnv,
-                    line_number,
-                    "Invalid export declaration.",
-                ));
-            }
+        if let Some(rest) = text
+            .strip_prefix("export")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        {
             text = rest.trim_start();
         }
         let (name, raw_value) = text.split_once('=').ok_or_else(|| {
@@ -268,7 +304,7 @@ fn parse_dotenv(
                 "Invalid variable name.",
             ));
         }
-        if !names.insert(name.to_ascii_lowercase()) {
+        if !names.insert(normalize_variable_name(name)) {
             return Err(TransferFileError::line(
                 TransferFileFormat::DotEnv,
                 line_number,
@@ -462,7 +498,7 @@ fn parse_registry(bytes: &[u8]) -> Result<Vec<EnvironmentVariable>, TransferFile
             )
         })?;
         let (name, data) = parse_registry_assignment(line, line_number)?;
-        if !names.insert((current_scope, name.to_ascii_lowercase())) {
+        if !names.insert((current_scope, normalize_variable_name(&name))) {
             return Err(TransferFileError::line(
                 TransferFileFormat::Registry,
                 line_number,
@@ -796,7 +832,7 @@ fn validate_variables(
         validate_variable_value(&variable.value).map_err(|_| {
             TransferFileError::format(format, "Invalid environment variable value.")
         })?;
-        if !names.insert((variable.scope, variable.name.to_ascii_lowercase())) {
+        if !names.insert((variable.scope, normalize_variable_name(&variable.name))) {
             return Err(TransferFileError::format(
                 format,
                 "Duplicate variable name in the same scope.",
@@ -812,9 +848,7 @@ fn sorted_variables(variables: &[EnvironmentVariable]) -> Vec<EnvironmentVariabl
         scope_order(left.scope)
             .cmp(&scope_order(right.scope))
             .then_with(|| {
-                left.name
-                    .to_ascii_lowercase()
-                    .cmp(&right.name.to_ascii_lowercase())
+                normalize_variable_name(&left.name).cmp(&normalize_variable_name(&right.name))
             })
             .then_with(|| left.name.cmp(&right.name))
     });
@@ -825,6 +859,13 @@ fn scope_order(scope: EnvironmentScope) -> u8 {
     match scope {
         EnvironmentScope::User => 0,
         EnvironmentScope::System => 1,
+    }
+}
+
+fn value_type_order(value_type: EnvironmentValueType) -> u8 {
+    match value_type {
+        EnvironmentValueType::String => 0,
+        EnvironmentValueType::ExpandableString => 1,
     }
 }
 
@@ -1063,6 +1104,49 @@ mod tests {
     }
 
     #[test]
+    fn json_and_dotenv_accept_utf8_boms() {
+        let mut json = vec![0xef, 0xbb, 0xbf];
+        json.extend_from_slice(
+            br#"{"schemaVersion":1,"variables":[{"name":"VALUE","value":"json","valueType":"string","scope":"user"}]}"#,
+        );
+        assert_eq!(
+            parse_import_bytes(TransferFileFormat::Json, &json, None).unwrap(),
+            vec![variable(
+                EnvironmentScope::User,
+                "VALUE",
+                "json",
+                EnvironmentValueType::String,
+            )]
+        );
+
+        let dotenv = b"\xef\xbb\xbfVALUE=dotenv\n";
+        assert_eq!(
+            parse_import_bytes(
+                TransferFileFormat::DotEnv,
+                dotenv,
+                Some(EnvironmentScope::User),
+            )
+            .unwrap(),
+            vec![variable(
+                EnvironmentScope::User,
+                "VALUE",
+                "dotenv",
+                EnvironmentValueType::String,
+            )]
+        );
+    }
+
+    #[test]
+    fn json_rejects_unicode_case_duplicate_names() {
+        let json = r#"{"schemaVersion":1,"variables":[{"name":"ÄPFEL","value":"one","valueType":"string","scope":"user"},{"name":"äpfel","value":"two","valueType":"string","scope":"user"}]}"#;
+
+        assert_error_contains(
+            parse_import_bytes(TransferFileFormat::Json, json.as_bytes(), None),
+            "duplicate",
+        );
+    }
+
+    #[test]
     fn dotenv_requires_a_default_scope_and_supports_common_syntax() {
         let bytes = br#"
 # comment
@@ -1117,6 +1201,47 @@ NO_INTERPOLATION=$PLAIN/bin
                 message,
             );
         }
+    }
+
+    #[test]
+    fn dotenv_treats_export_as_a_prefix_only_when_followed_by_whitespace() {
+        let variables = parse_import_bytes(
+            TransferFileFormat::DotEnv,
+            b"exportFOO=value\nexport BAR=other\n",
+            Some(EnvironmentScope::User),
+        )
+        .unwrap();
+
+        assert_eq!(variables[0].name, "exportFOO");
+        assert_eq!(variables[0].value, "value");
+        assert_eq!(variables[1].name, "BAR");
+        assert_eq!(variables[1].value, "other");
+    }
+
+    #[test]
+    fn import_tokens_are_semantic_order_independent_and_value_sensitive() {
+        let first = parse_import_bytes(
+            TransferFileFormat::DotEnv,
+            b"# first comment\nB=two\nA=one\n",
+            Some(EnvironmentScope::User),
+        )
+        .unwrap();
+        let second = parse_import_bytes(
+            TransferFileFormat::DotEnv,
+            b"A=one\n# different comment\nB=two\n",
+            Some(EnvironmentScope::User),
+        )
+        .unwrap();
+        let changed = parse_import_bytes(
+            TransferFileFormat::DotEnv,
+            b"A=changed\nB=two\n",
+            Some(EnvironmentScope::User),
+        )
+        .unwrap();
+
+        assert_eq!(import_token(&first), import_token(&second));
+        assert_ne!(import_token(&first), import_token(&changed));
+        assert_eq!(import_token(&first).len(), 64);
     }
 
     #[test]
@@ -1363,6 +1488,25 @@ NO_INTERPOLATION=$PLAIN/bin
     }
 
     #[test]
+    fn registry_rejects_unicode_case_duplicate_names() {
+        let text = concat!(
+            "Windows Registry Editor Version 5.00\r\n\r\n",
+            "[HKEY_CURRENT_USER\\Environment]\r\n",
+            "\"ÄPFEL\"=\"one\"\r\n",
+            "\"äpfel\"=\"two\"\r\n"
+        );
+
+        assert_error_contains(
+            parse_import_bytes(
+                TransferFileFormat::Registry,
+                &encode_utf16le_bom(text),
+                None,
+            ),
+            "duplicate",
+        );
+    }
+
+    #[test]
     fn json_and_registry_mixed_scope_exports_are_stably_sorted() {
         let variables = vec![
             variable(
@@ -1408,6 +1552,14 @@ NO_INTERPOLATION=$PLAIN/bin
         };
 
         assert_error_contains(read_import_file(&request), "large");
+    }
+
+    #[test]
+    fn bounded_reader_stops_after_limit_plus_one_byte() {
+        let mut reader = std::io::Cursor::new(vec![b'A'; MAX_IMPORT_SIZE as usize + 1024]);
+
+        assert_error_contains(read_bounded(&mut reader), "large");
+        assert_eq!(reader.position(), MAX_IMPORT_SIZE + 1);
     }
 
     #[test]

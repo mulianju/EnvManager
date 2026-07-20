@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the EnvManager windows",
-  "windows": ["main", "quick"],
+  "description": "Capability for the main EnvManager window",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "opener:default",

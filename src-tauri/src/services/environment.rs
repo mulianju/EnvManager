@@ -150,11 +150,7 @@ impl EnvironmentService {
     }
 
     pub fn launch_powershell(&self) -> Result<(), EnvironmentServiceError> {
-        let user_variables = self.store.list(EnvironmentScope::User)?;
-        let system_variables = self.store.list(EnvironmentScope::System)?;
-        let base = std::env::vars().collect::<Vec<_>>();
-        let environment = compose_process_environment(&base, &user_variables, &system_variables);
-        crate::platform::launch_powershell(&environment)?;
+        crate::platform::launch_powershell()?;
         Ok(())
     }
 
@@ -644,9 +640,12 @@ pub fn compose_process_environment(
     user: &[EnvironmentVariable],
     system: &[EnvironmentVariable],
 ) -> Vec<(String, String)> {
-    let mut composed = HashMap::<String, (String, String)>::new();
+    let mut composed = HashMap::<String, (String, String, bool)>::new();
     for (name, value) in base.iter().filter(|(name, _)| !is_path_variable(name)) {
-        composed.insert(name.to_ascii_lowercase(), (name.clone(), value.clone()));
+        composed.insert(
+            name.to_ascii_lowercase(),
+            (name.clone(), value.clone(), false),
+        );
     }
     for variable in system
         .iter()
@@ -654,7 +653,11 @@ pub fn compose_process_environment(
     {
         composed.insert(
             variable.name.to_ascii_lowercase(),
-            (variable.name.clone(), variable.value.clone()),
+            (
+                variable.name.clone(),
+                variable.value.clone(),
+                variable.value_type == EnvironmentValueType::ExpandableString,
+            ),
         );
     }
     for variable in user
@@ -663,7 +666,11 @@ pub fn compose_process_environment(
     {
         composed.insert(
             variable.name.to_ascii_lowercase(),
-            (variable.name.clone(), variable.value.clone()),
+            (
+                variable.name.clone(),
+                variable.value.clone(),
+                variable.value_type == EnvironmentValueType::ExpandableString,
+            ),
         );
     }
 
@@ -690,18 +697,39 @@ pub fn compose_process_environment(
             .clone();
         composed.insert(
             "path".to_owned(),
-            (display_name, join_path_entries(&entries)),
+            (display_name, join_path_entries(&entries), false),
         );
     }
 
     let raw_values = composed
         .iter()
-        .map(|(normalized_name, (_, value))| (normalized_name.clone(), value.clone()))
+        .map(|(normalized_name, (_, value, _))| (normalized_name.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
+    let expanded_path = if system_path.is_some() || user_path.is_some() {
+        Some(join_path_entries(
+            &system_path
+                .into_iter()
+                .flat_map(|variable| expanded_path_entries(variable, &raw_values))
+                .chain(
+                    user_path
+                        .into_iter()
+                        .flat_map(|variable| expanded_path_entries(variable, &raw_values)),
+                )
+                .collect::<Vec<_>>(),
+        ))
+    } else {
+        None
+    };
     let mut result = composed
-        .into_values()
-        .map(|(name, value)| {
-            let value = expand_percent_variables(&value, &raw_values);
+        .into_iter()
+        .map(|(normalized_name, (name, value, expandable))| {
+            let value = if normalized_name == "path" {
+                expanded_path.clone().unwrap_or(value)
+            } else if expandable {
+                expand_percent_variables(&value, &raw_values)
+            } else {
+                value
+            };
             (name, value)
         })
         .collect::<Vec<_>>();
@@ -711,6 +739,18 @@ pub fn compose_process_environment(
             .then_with(|| left.cmp(right))
     });
     result
+}
+
+fn expanded_path_entries(
+    variable: &EnvironmentVariable,
+    variables: &HashMap<String, String>,
+) -> Vec<String> {
+    let value = if variable.value_type == EnvironmentValueType::ExpandableString {
+        expand_percent_variables(&variable.value, variables)
+    } else {
+        variable.value.clone()
+    };
+    parse_path_entries(&value)
 }
 
 fn expand_percent_variables(value: &str, variables: &HashMap<String, String>) -> String {
@@ -1182,7 +1222,8 @@ mod tests {
         ];
         let system = vec![
             variable(EnvironmentScope::System, "Root", r"C:\System"),
-            expandable_variable(EnvironmentScope::System, "PATH", r"%ROOT%\SystemBin"),
+            variable(EnvironmentScope::System, "LITERAL", r"%ROOT%\literal"),
+            variable(EnvironmentScope::System, "PATH", r"%ROOT%\SystemBin"),
             expandable_variable(EnvironmentScope::System, "CHAIN", "%ROOT%\\chain"),
         ];
         let user = vec![
@@ -1197,9 +1238,10 @@ mod tests {
             .collect::<HashMap<_, _>>();
 
         assert_eq!(values["root"], r"C:\User");
-        assert_eq!(values["dynamic_base"], r"C:\User\dynamic");
+        assert_eq!(values["dynamic_base"], r"%Root%\dynamic");
+        assert_eq!(values["literal"], r"%ROOT%\literal");
         assert_eq!(values["chain"], r"C:\User\chain");
-        assert_eq!(values["path"], r"C:\User\SystemBin;C:\User\chain\UserBin");
+        assert_eq!(values["path"], r"%ROOT%\SystemBin;C:\User\chain\UserBin");
         assert!(!values["path"].contains("StaleBase"));
         assert_eq!(values["unknown_ref"], r"%MISSING%\bin");
     }

@@ -3,13 +3,17 @@ use crate::domain::environment::{
     EnvironmentScope, EnvironmentValueType, EnvironmentVariable, EnvironmentVariableInput,
     variable_names_equal,
 };
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Security::TOKEN_QUERY;
+use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, SendMessageTimeoutW, WM_SETTINGCHANGE,
@@ -23,6 +27,7 @@ use winreg::types::{FromRegValue, ToRegValue};
 const USER_ENVIRONMENT_KEY: &str = "Environment";
 const SYSTEM_ENVIRONMENT_KEY: &str =
     r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+const MAX_ENVIRONMENT_BLOCK_CODE_UNITS: usize = 1_048_576;
 
 pub struct WindowsEnvironmentStore;
 
@@ -129,7 +134,7 @@ pub fn restart_as_administrator() -> Result<(), EnvironmentStoreError> {
     Ok(())
 }
 
-pub fn launch_powershell(environment: &[(String, String)]) -> Result<(), EnvironmentStoreError> {
+pub fn launch_powershell() -> Result<(), EnvironmentStoreError> {
     let windows_directory = windows_directory()?;
     let executable = powershell_path_from_windows_directory(&windows_directory)?;
     if !executable.is_file() {
@@ -138,11 +143,12 @@ pub fn launch_powershell(environment: &[(String, String)]) -> Result<(), Environ
             executable.display()
         )));
     }
+    let environment = fresh_windows_environment()?;
 
     Command::new(&executable)
         .arg("-NoLogo")
         .env_clear()
-        .envs(environment.iter().cloned())
+        .envs(environment)
         .creation_flags(0x00000010)
         .spawn()
         .map_err(|error| {
@@ -152,6 +158,117 @@ pub fn launch_powershell(environment: &[(String, String)]) -> Result<(), Environ
             ))
         })?;
     Ok(())
+}
+
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+struct OwnedEnvironmentBlock(*mut core::ffi::c_void);
+
+impl Drop for OwnedEnvironmentBlock {
+    fn drop(&mut self) {
+        unsafe {
+            DestroyEnvironmentBlock(self.0);
+        }
+    }
+}
+
+fn fresh_windows_environment() -> Result<Vec<(OsString, OsString)>, EnvironmentStoreError> {
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(last_operation_error("open the current process token"));
+    }
+    let _token = OwnedHandle(token);
+
+    let mut block = std::ptr::null_mut();
+    if unsafe { CreateEnvironmentBlock(&mut block, token, 0) } == 0 {
+        return Err(last_operation_error("create a fresh Windows environment"));
+    }
+    let block = OwnedEnvironmentBlock(block);
+    let units = read_environment_block(block.0.cast::<u16>())?;
+    parse_environment_block(&units)
+}
+
+fn read_environment_block(pointer: *const u16) -> Result<Vec<u16>, EnvironmentStoreError> {
+    if pointer.is_null() {
+        return Err(EnvironmentStoreError::OperationFailed(
+            "Windows returned a null environment block.".to_owned(),
+        ));
+    }
+    let mut units = Vec::new();
+    for index in 0..MAX_ENVIRONMENT_BLOCK_CODE_UNITS {
+        let unit = unsafe { *pointer.add(index) };
+        units.push(unit);
+        if unit == 0 && units.len() > 1 && units[units.len() - 2] == 0 {
+            return Ok(units);
+        }
+    }
+    Err(EnvironmentStoreError::OperationFailed(format!(
+        "Windows environment block exceeded {MAX_ENVIRONMENT_BLOCK_CODE_UNITS} UTF-16 code units."
+    )))
+}
+
+fn parse_environment_block(
+    units: &[u16],
+) -> Result<Vec<(OsString, OsString)>, EnvironmentStoreError> {
+    if units.len() > MAX_ENVIRONMENT_BLOCK_CODE_UNITS {
+        return Err(EnvironmentStoreError::OperationFailed(format!(
+            "Windows environment block exceeded {MAX_ENVIRONMENT_BLOCK_CODE_UNITS} UTF-16 code units."
+        )));
+    }
+    let block_end = units
+        .windows(2)
+        .position(|pair| pair == [0, 0])
+        .ok_or_else(|| {
+            EnvironmentStoreError::OperationFailed(
+                "Windows environment block is missing its double-NUL terminator.".to_owned(),
+            )
+        })?;
+    let mut environment = Vec::new();
+    let mut cursor = 0;
+    while cursor < block_end {
+        let entry_end = units[cursor..=block_end]
+            .iter()
+            .position(|unit| *unit == 0)
+            .map(|offset| cursor + offset)
+            .ok_or_else(|| {
+                EnvironmentStoreError::OperationFailed(
+                    "Windows environment block contains an unterminated entry.".to_owned(),
+                )
+            })?;
+        let entry = &units[cursor..entry_end];
+        cursor = entry_end + 1;
+        if entry.first() == Some(&('=' as u16)) {
+            continue;
+        }
+        let separator = entry
+            .iter()
+            .position(|unit| *unit == '=' as u16)
+            .ok_or_else(|| {
+                EnvironmentStoreError::OperationFailed(
+                    "Windows environment block contains an entry without '='.".to_owned(),
+                )
+            })?;
+        environment.push((
+            OsString::from_wide(&entry[..separator]),
+            OsString::from_wide(&entry[separator + 1..]),
+        ));
+    }
+    Ok(environment)
+}
+
+fn last_operation_error(action: &str) -> EnvironmentStoreError {
+    EnvironmentStoreError::OperationFailed(format!(
+        "Failed to {action}: {}",
+        io::Error::last_os_error()
+    ))
 }
 
 fn windows_directory() -> Result<PathBuf, EnvironmentStoreError> {
@@ -231,6 +348,15 @@ fn path_to_wide(path: &Path) -> Vec<u16> {
 mod tests {
     use super::*;
 
+    fn environment_block(entries: &[&str]) -> Vec<u16> {
+        let mut block = entries
+            .iter()
+            .flat_map(|entry| OsStr::new(entry).encode_wide().chain(Some(0)))
+            .collect::<Vec<_>>();
+        block.push(0);
+        block
+    }
+
     #[test]
     fn reads_real_user_and_system_environment_keys_without_writing() {
         let store = WindowsEnvironmentStore;
@@ -255,5 +381,48 @@ mod tests {
             PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
         );
         assert!(executable.is_absolute());
+    }
+
+    #[test]
+    fn parses_environment_blocks_with_empty_values_and_pseudo_entries() {
+        let block = environment_block(&["SystemRoot=C:\\Windows", "EMPTY=", "=C:=C:\\Work"]);
+
+        let environment = parse_environment_block(&block).unwrap();
+
+        assert_eq!(
+            environment,
+            vec![
+                (OsString::from("SystemRoot"), OsString::from(r"C:\Windows")),
+                (OsString::from("EMPTY"), OsString::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_an_environment_block_without_a_double_nul_terminator() {
+        let block = OsStr::new("SystemRoot=C:\\Windows")
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+
+        let error = parse_environment_block(&block).unwrap_err();
+
+        assert!(error.to_string().contains("double-NUL"));
+    }
+
+    #[test]
+    fn creates_and_releases_a_fresh_windows_environment_block() {
+        let environment = fresh_windows_environment().unwrap();
+
+        assert!(environment.iter().any(|(name, _)| {
+            name.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("SystemRoot")
+        }));
+        assert!(environment.iter().any(|(name, _)| {
+            name.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("Path")
+        }));
     }
 }

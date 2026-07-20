@@ -39,6 +39,7 @@ impl From<EnvironmentServiceError> for ApiError {
             }
             EnvironmentServiceError::Store(_) => "registryOperationFailed",
             EnvironmentServiceError::Backup(_) => "backupOperationFailed",
+            EnvironmentServiceError::TransferFile(_) => "transferFileOperationFailed",
         };
         Self::new(code, error)
     }

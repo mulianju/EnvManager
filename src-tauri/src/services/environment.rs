@@ -5,6 +5,10 @@ use crate::domain::environment::{
 };
 use crate::platform::{EnvironmentStore, EnvironmentStoreError};
 use crate::services::backup::{BackupDocument, BackupError, BackupStore, BackupSummary};
+use crate::services::transfer_file::{
+    ExportFileRequest, ExportSummary, ImportAction, ImportConflictStrategy, ImportFileRequest,
+    ImportPreview, ImportPreviewItem, TransferFileError, read_import_file, write_export_file,
+};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -68,6 +72,7 @@ pub enum EnvironmentServiceError {
     TransactionRollbackFailed(String),
     Store(EnvironmentStoreError),
     Backup(BackupError),
+    TransferFile(TransferFileError),
 }
 
 impl fmt::Display for EnvironmentServiceError {
@@ -93,6 +98,7 @@ impl fmt::Display for EnvironmentServiceError {
             }
             Self::Store(error) => error.fmt(formatter),
             Self::Backup(error) => error.fmt(formatter),
+            Self::TransferFile(error) => error.fmt(formatter),
         }
     }
 }
@@ -114,6 +120,12 @@ impl From<EnvironmentStoreError> for EnvironmentServiceError {
 impl From<BackupError> for EnvironmentServiceError {
     fn from(error: BackupError) -> Self {
         Self::Backup(error)
+    }
+}
+
+impl From<TransferFileError> for EnvironmentServiceError {
+    fn from(error: TransferFileError) -> Self {
+        Self::TransferFile(error)
     }
 }
 
@@ -152,6 +164,105 @@ impl EnvironmentService {
     pub fn launch_powershell(&self) -> Result<(), EnvironmentServiceError> {
         crate::platform::launch_powershell()?;
         Ok(())
+    }
+
+    pub fn preview_import(
+        &self,
+        request: &ImportFileRequest,
+    ) -> Result<ImportPreview, EnvironmentServiceError> {
+        let variables = read_import_file(request)?;
+        self.build_import_preview(variables)
+    }
+
+    pub fn apply_import(
+        &self,
+        request: &ImportFileRequest,
+        strategy: ImportConflictStrategy,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        let variables = read_import_file(request)?;
+        if variables.is_empty() {
+            return Err(EnvironmentServiceError::InvalidTransfer(
+                "Import file does not contain any variables.".to_owned(),
+            ));
+        }
+        let preview = self.build_import_preview(variables)?;
+        let writes = preview
+            .items
+            .into_iter()
+            .filter(|item| match (strategy, item.action) {
+                (_, ImportAction::Unchanged) => false,
+                (ImportConflictStrategy::SkipExisting, ImportAction::Update) => false,
+                _ => true,
+            })
+            .collect::<Vec<_>>();
+        if writes.is_empty() {
+            return Ok(MutationResult {
+                snapshot: self.snapshot()?,
+                undo_backup_ids: Vec::new(),
+            });
+        }
+
+        let affected_scopes = [EnvironmentScope::User, EnvironmentScope::System]
+            .into_iter()
+            .filter(|scope| writes.iter().any(|item| item.variable.scope == *scope))
+            .collect::<Vec<_>>();
+        for scope in &affected_scopes {
+            self.require_scope_permission(*scope)?;
+        }
+
+        let mut rollback_states = Vec::with_capacity(affected_scopes.len());
+        for scope in &affected_scopes {
+            rollback_states.push((*scope, self.store.list(*scope)?));
+        }
+        let mut undo_backup_ids = Vec::with_capacity(rollback_states.len());
+        for (scope, variables) in &rollback_states {
+            let backup = self
+                .backups
+                .create(*scope, "beforeImport", variables.clone())?;
+            undo_backup_ids.push(backup.id);
+        }
+
+        for scope in affected_scopes {
+            for item in writes.iter().filter(|item| item.variable.scope == scope) {
+                let original_name = rollback_states
+                    .iter()
+                    .find(|(rollback_scope, _)| *rollback_scope == scope)
+                    .and_then(|(_, variables)| {
+                        variables.iter().find(|existing| {
+                            variable_names_equal(&existing.name, &item.variable.name)
+                        })
+                    })
+                    .map(|existing| existing.name.clone());
+                let input = EnvironmentVariableInput {
+                    original_name,
+                    name: item.variable.name.clone(),
+                    value: item.variable.value.clone(),
+                    value_type: item.variable.value_type,
+                    scope,
+                };
+                if let Err(error) = self.store.set(&input) {
+                    return Err(self.rollback_error(error.into(), &rollback_states));
+                }
+            }
+        }
+
+        self.finalize_transaction(undo_backup_ids, &rollback_states)
+    }
+
+    pub fn export_file(
+        &self,
+        request: &ExportFileRequest,
+    ) -> Result<ExportSummary, EnvironmentServiceError> {
+        let variables = match request.scope {
+            Some(scope) => self.store.list(scope)?,
+            None => self
+                .store
+                .list(EnvironmentScope::User)?
+                .into_iter()
+                .chain(self.store.list(EnvironmentScope::System)?)
+                .collect(),
+        };
+        Ok(write_export_file(request, &variables)?)
     }
 
     pub fn set_variable(
@@ -388,6 +499,57 @@ impl EnvironmentService {
             return Err(EnvironmentServiceError::ElevationRequired);
         }
         Ok(())
+    }
+
+    fn build_import_preview(
+        &self,
+        variables: Vec<EnvironmentVariable>,
+    ) -> Result<ImportPreview, EnvironmentServiceError> {
+        let needs_user = variables
+            .iter()
+            .any(|variable| variable.scope == EnvironmentScope::User);
+        let needs_system = variables
+            .iter()
+            .any(|variable| variable.scope == EnvironmentScope::System);
+        let user = if needs_user {
+            self.store.list(EnvironmentScope::User)?
+        } else {
+            Vec::new()
+        };
+        let system = if needs_system {
+            self.store.list(EnvironmentScope::System)?
+        } else {
+            Vec::new()
+        };
+        let items = variables
+            .into_iter()
+            .map(|variable| {
+                let current = match variable.scope {
+                    EnvironmentScope::User => &user,
+                    EnvironmentScope::System => &system,
+                };
+                let existing = current
+                    .iter()
+                    .find(|item| variable_names_equal(&item.name, &variable.name))
+                    .cloned();
+                let action = match &existing {
+                    None => ImportAction::Create,
+                    Some(existing)
+                        if existing.value == variable.value
+                            && existing.value_type == variable.value_type =>
+                    {
+                        ImportAction::Unchanged
+                    }
+                    Some(_) => ImportAction::Update,
+                };
+                ImportPreviewItem {
+                    variable,
+                    existing,
+                    action,
+                }
+            })
+            .collect();
+        Ok(ImportPreview { items })
     }
 
     fn finalize_transaction(
@@ -840,13 +1002,14 @@ mod tests {
         fn set(&self, input: &EnvironmentVariableInput) -> Result<(), EnvironmentStoreError> {
             let mut state = self.state.lock().unwrap();
             state.set_calls += 1;
-            let should_fail = state
-                .fail_next_set
-                .as_ref()
-                .is_some_and(|(failure_scope, failure_name)| {
-                    *failure_scope == input.scope
-                        && variable_names_equal(failure_name, &input.name)
-                });
+            let should_fail =
+                state
+                    .fail_next_set
+                    .as_ref()
+                    .is_some_and(|(failure_scope, failure_name)| {
+                        *failure_scope == input.scope
+                            && variable_names_equal(failure_name, &input.name)
+                    });
             if should_fail {
                 state.fail_next_set = None;
                 return Err(EnvironmentStoreError::OperationFailed(
@@ -2184,10 +2347,8 @@ mod tests {
             "env",
             b"EXISTING=after\nSame=same\nNEW_VALUE=fresh\n",
         );
-        let request = file.import_request(
-            TransferFileFormat::DotEnv,
-            Some(EnvironmentScope::System),
-        );
+        let request =
+            file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::System));
 
         let preview = harness.service.preview_import(&request).unwrap();
 
@@ -2227,10 +2388,7 @@ mod tests {
             "env",
             b"EXISTING=after\nSAME=same\nNEW_VALUE=fresh\n",
         );
-        let request = file.import_request(
-            TransferFileFormat::DotEnv,
-            Some(EnvironmentScope::User),
-        );
+        let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
 
         let result = harness
             .service
@@ -2243,12 +2401,7 @@ mod tests {
             "EXISTING",
             "before",
         );
-        assert_variable(
-            &result.snapshot,
-            EnvironmentScope::User,
-            "SAME",
-            "same",
-        );
+        assert_variable(&result.snapshot, EnvironmentScope::User, "SAME", "same");
         assert_variable(
             &result.snapshot,
             EnvironmentScope::User,
@@ -2285,10 +2438,7 @@ mod tests {
             "env",
             b"EXISTING=after\nSAME=same\nNEW_VALUE=fresh\n",
         );
-        let request = file.import_request(
-            TransferFileFormat::DotEnv,
-            Some(EnvironmentScope::User),
-        );
+        let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
 
         let result = harness
             .service
@@ -2343,7 +2493,11 @@ mod tests {
         seed(
             &harness.state,
             EnvironmentScope::User,
-            vec![variable(EnvironmentScope::User, "USER_VALUE", "before-user")],
+            vec![variable(
+                EnvironmentScope::User,
+                "USER_VALUE",
+                "before-user",
+            )],
         );
         seed(
             &harness.state,
@@ -2356,11 +2510,7 @@ mod tests {
         );
         let variables = vec![
             variable(EnvironmentScope::User, "USER_VALUE", "after-user"),
-            variable(
-                EnvironmentScope::System,
-                "SYSTEM_VALUE",
-                "after-system",
-            ),
+            variable(EnvironmentScope::System, "SYSTEM_VALUE", "after-system"),
         ];
         let file = TestFile::new("mixed-success", "json", &json_import(&variables));
         let request = file.import_request(TransferFileFormat::Json, None);
@@ -2423,7 +2573,11 @@ mod tests {
         seed(
             &harness.state,
             EnvironmentScope::User,
-            vec![variable(EnvironmentScope::User, "USER_VALUE", "before-user")],
+            vec![variable(
+                EnvironmentScope::User,
+                "USER_VALUE",
+                "before-user",
+            )],
         );
         seed(
             &harness.state,
@@ -2436,18 +2590,12 @@ mod tests {
         );
         let variables = vec![
             variable(EnvironmentScope::User, "USER_VALUE", "after-user"),
-            variable(
-                EnvironmentScope::System,
-                "SYSTEM_VALUE",
-                "after-system",
-            ),
+            variable(EnvironmentScope::System, "SYSTEM_VALUE", "after-system"),
         ];
         let file = TestFile::new("mixed-failure", "json", &json_import(&variables));
         let request = file.import_request(TransferFileFormat::Json, None);
-        harness.state.lock().unwrap().fail_next_set = Some((
-            EnvironmentScope::System,
-            "SYSTEM_VALUE".to_owned(),
-        ));
+        harness.state.lock().unwrap().fail_next_set =
+            Some((EnvironmentScope::System, "SYSTEM_VALUE".to_owned()));
 
         let result = harness
             .service
@@ -2478,10 +2626,7 @@ mod tests {
     fn import_rejects_an_empty_file_without_side_effects() {
         let harness = service(false);
         let file = TestFile::new("empty", "env", b"# comments only\n\n");
-        let request = file.import_request(
-            TransferFileFormat::DotEnv,
-            Some(EnvironmentScope::User),
-        );
+        let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
 
         assert!(
             harness
@@ -2499,12 +2644,12 @@ mod tests {
     fn apply_import_reloads_a_file_that_changed_after_preview() {
         let harness = service(false);
         let file = TestFile::new("reload", "env", b"VALUE=preview\n");
-        let request = file.import_request(
-            TransferFileFormat::DotEnv,
-            Some(EnvironmentScope::User),
-        );
+        let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
         let preview = harness.service.preview_import(&request).unwrap();
-        assert_eq!(find_preview_item(&preview, "VALUE").variable.value, "preview");
+        assert_eq!(
+            find_preview_item(&preview, "VALUE").variable.value,
+            "preview"
+        );
         std::fs::write(&file.path, b"VALUE=latest\n").unwrap();
 
         let result = harness
@@ -2512,23 +2657,14 @@ mod tests {
             .apply_import(&request, ImportConflictStrategy::Overwrite)
             .unwrap();
 
-        assert_variable(
-            &result.snapshot,
-            EnvironmentScope::User,
-            "VALUE",
-            "latest",
-        );
+        assert_variable(&result.snapshot, EnvironmentScope::User, "VALUE", "latest");
     }
 
     #[test]
     fn export_reads_current_scopes_without_elevation_backup_or_broadcast() {
         let harness = service(false);
         let user = variable(EnvironmentScope::User, "USER_VALUE", "user");
-        let system = expandable_variable(
-            EnvironmentScope::System,
-            "SYSTEM_VALUE",
-            "%SystemRoot%",
-        );
+        let system = expandable_variable(EnvironmentScope::System, "SYSTEM_VALUE", "%SystemRoot%");
         seed(&harness.state, EnvironmentScope::User, vec![user.clone()]);
         seed(
             &harness.state,
@@ -2553,10 +2689,8 @@ mod tests {
         );
 
         let system_file = TestFile::new("export-system", "reg", b"old");
-        let system_request = system_file.export_request(
-            TransferFileFormat::Registry,
-            Some(EnvironmentScope::System),
-        );
+        let system_request = system_file
+            .export_request(TransferFileFormat::Registry, Some(EnvironmentScope::System));
         let system_summary = harness.service.export_file(&system_request).unwrap();
         assert_eq!(system_summary.variable_count, 1);
         assert_eq!(

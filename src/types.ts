@@ -39,6 +39,22 @@ export interface PathEntryStatus {
   duplicate: boolean;
 }
 
+export type PathStatusFilter = "all" | "duplicate" | "missing";
+
+export interface PathChangeSummary {
+  added: string[];
+  removed: string[];
+  orderChanged: boolean;
+}
+
+export interface EffectiveEnvironmentVariable extends EnvironmentVariable {
+  source: EnvironmentScope | "combined";
+  shadowed: boolean;
+  conflict: boolean;
+}
+
+export type VariableCopyFormat = "name" | "value" | "powershell";
+
 export interface ApiError {
   code: string;
   message: string;

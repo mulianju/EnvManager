@@ -1,4 +1,11 @@
-import type { EnvironmentVariable } from "../types";
+import type {
+  EffectiveEnvironmentVariable,
+  EnvironmentVariable,
+  PathChangeSummary,
+  PathEntryStatus,
+  PathStatusFilter,
+  VariableCopyFormat,
+} from "../types";
 
 export function parsePathEntries(value: string): string[] {
   return value
@@ -33,6 +40,120 @@ export function duplicatePathEntryIndexes(entries: string[]): number[] {
     .filter((indexes) => indexes.length > 1)
     .flat()
     .sort((left, right) => left - right);
+}
+
+export function parsePathBulkInput(value: string): string[] {
+  return value
+    .split(/[;\r\n]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+export function deduplicatePathEntries(entries: string[]): string[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    const normalized = normalizePathEntry(entry);
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+export function filterPathEntryStatuses(
+  statuses: PathEntryStatus[],
+  filter: PathStatusFilter,
+): PathEntryStatus[] {
+  if (filter === "duplicate") {
+    return statuses.filter(({ duplicate }) => duplicate);
+  }
+  if (filter === "missing") {
+    return statuses.filter(({ exists }) => !exists);
+  }
+  return statuses;
+}
+
+export function summarizePathChanges(
+  previousEntries: string[],
+  currentEntries: string[],
+): PathChangeSummary {
+  const previousIdentities = previousEntries.map(normalizePathEntry);
+  const currentIdentities = currentEntries.map(normalizePathEntry);
+  const previousSet = new Set(previousIdentities);
+  const currentSet = new Set(currentIdentities);
+  const added = currentEntries.filter((_, index) => !previousSet.has(currentIdentities[index]));
+  const removed = previousEntries.filter((_, index) => !currentSet.has(previousIdentities[index]));
+  const orderChanged =
+    added.length === 0 &&
+    removed.length === 0 &&
+    previousIdentities.some((identity, index) => identity !== currentIdentities[index]);
+
+  return { added, removed, orderChanged };
+}
+
+export function mergeEffectiveVariables(
+  userVariables: EnvironmentVariable[],
+  systemVariables: EnvironmentVariable[],
+): EffectiveEnvironmentVariable[] {
+  const userByName = new Map(userVariables.map((variable) => [variable.name.toLowerCase(), variable]));
+  const systemByName = new Map(
+    systemVariables.map((variable) => [variable.name.toLowerCase(), variable]),
+  );
+  const names = [
+    ...systemVariables.map(({ name }) => name.toLowerCase()),
+    ...userVariables.map(({ name }) => name.toLowerCase()),
+  ];
+
+  return [...new Set(names)].map((name) => {
+    const userVariable = userByName.get(name);
+    const systemVariable = systemByName.get(name);
+
+    if (isPathVariable(name) && userVariable && systemVariable) {
+      return {
+        ...userVariable,
+        value: joinPathEntries([
+          ...parsePathEntries(systemVariable.value),
+          ...parsePathEntries(userVariable.value),
+        ]),
+        valueType:
+          userVariable.valueType === "expandableString" ||
+          systemVariable.valueType === "expandableString"
+            ? "expandableString"
+            : "string",
+        source: "combined",
+        shadowed: false,
+        conflict: false,
+      };
+    }
+
+    if (userVariable) {
+      return {
+        ...userVariable,
+        source: "user",
+        shadowed: Boolean(systemVariable),
+        conflict: Boolean(systemVariable),
+      };
+    }
+
+    return {
+      ...systemVariable!,
+      source: "system",
+      shadowed: false,
+      conflict: false,
+    };
+  });
+}
+
+export function formatVariableForCopy(
+  variable: EnvironmentVariable,
+  format: VariableCopyFormat,
+): string {
+  if (format === "name") return variable.name;
+  if (format === "value") return variable.value;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name)) {
+    return `$env:${variable.name}`;
+  }
+  const escapedName = variable.name.replace(/'/g, "''");
+  return `[Environment]::GetEnvironmentVariable('${escapedName}')`;
 }
 
 export function isPathVariable(name: string): boolean {

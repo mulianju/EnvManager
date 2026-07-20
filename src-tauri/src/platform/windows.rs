@@ -6,7 +6,9 @@ use crate::domain::environment::{
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::process::CommandExt;
 use std::path::Path;
+use std::process::Command;
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, SendMessageTimeoutW, WM_SETTINGCHANGE,
@@ -123,6 +125,38 @@ pub fn restart_as_administrator() -> Result<(), EnvironmentStoreError> {
             "Windows did not start an elevated process.".to_owned(),
         ));
     }
+    Ok(())
+}
+
+pub fn launch_powershell(environment: &[(String, String)]) -> Result<(), EnvironmentStoreError> {
+    let system_root = environment
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("SystemRoot"))
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var("SystemRoot").ok())
+        .ok_or_else(|| {
+            EnvironmentStoreError::OperationFailed(
+                "Unable to locate Windows PowerShell because SystemRoot is unavailable.".to_owned(),
+            )
+        })?;
+    let executable = Path::new(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+
+    Command::new(&executable)
+        .arg("-NoLogo")
+        .env_clear()
+        .envs(environment.iter().cloned())
+        .creation_flags(0x00000010)
+        .spawn()
+        .map_err(|error| {
+            EnvironmentStoreError::OperationFailed(format!(
+                "Unable to launch {}: {error}",
+                executable.display()
+            ))
+        })?;
     Ok(())
 }
 

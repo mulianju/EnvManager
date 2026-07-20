@@ -1,6 +1,7 @@
 use crate::domain::environment::{
-    EnvironmentScope, EnvironmentValidationError, EnvironmentVariable, EnvironmentVariableInput,
-    TransferMode, TransferVariableInput, duplicate_path_entry_indexes, variable_names_equal,
+    EnvironmentScope, EnvironmentValidationError, EnvironmentValueType, EnvironmentVariable,
+    EnvironmentVariableInput, TransferMode, TransferVariableInput, duplicate_path_entry_indexes,
+    is_path_variable, join_path_entries, parse_path_entries, variable_names_equal,
 };
 use crate::platform::{EnvironmentStore, EnvironmentStoreError};
 use crate::services::backup::{BackupDocument, BackupError, BackupStore, BackupSummary};
@@ -14,9 +15,30 @@ use std::path::{Path, PathBuf};
 pub struct EnvironmentSnapshot {
     pub user_variables: Vec<EnvironmentVariable>,
     pub system_variables: Vec<EnvironmentVariable>,
+    pub effective_variables: Vec<EffectiveEnvironmentVariable>,
+    pub revision: String,
     pub is_elevated: bool,
     pub backups: Vec<BackupSummary>,
     pub backup_directory: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EffectiveVariableSource {
+    User,
+    System,
+    Combined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveEnvironmentVariable {
+    pub name: String,
+    pub value: String,
+    pub value_type: EnvironmentValueType,
+    pub source: EffectiveVariableSource,
+    pub shadowed: bool,
+    pub conflict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,13 +128,34 @@ impl EnvironmentService {
     }
 
     pub fn snapshot(&self) -> Result<EnvironmentSnapshot, EnvironmentServiceError> {
+        let user_variables = self.store.list(EnvironmentScope::User)?;
+        let system_variables = self.store.list(EnvironmentScope::System)?;
+        let effective_variables = build_effective_variables(&user_variables, &system_variables);
+        let revision = environment_revision(&user_variables, &system_variables);
         Ok(EnvironmentSnapshot {
-            user_variables: self.store.list(EnvironmentScope::User)?,
-            system_variables: self.store.list(EnvironmentScope::System)?,
+            user_variables,
+            system_variables,
+            effective_variables,
+            revision,
             is_elevated: self.store.is_elevated(),
             backups: self.backups.list()?,
             backup_directory: self.backups.directory().to_owned(),
         })
+    }
+
+    pub fn revision(&self) -> Result<String, EnvironmentServiceError> {
+        let user_variables = self.store.list(EnvironmentScope::User)?;
+        let system_variables = self.store.list(EnvironmentScope::System)?;
+        Ok(environment_revision(&user_variables, &system_variables))
+    }
+
+    pub fn launch_powershell(&self) -> Result<(), EnvironmentServiceError> {
+        let user_variables = self.store.list(EnvironmentScope::User)?;
+        let system_variables = self.store.list(EnvironmentScope::System)?;
+        let base = std::env::vars().collect::<Vec<_>>();
+        let environment = compose_process_environment(&base, &user_variables, &system_variables);
+        crate::platform::launch_powershell(&environment)?;
+        Ok(())
     }
 
     pub fn set_variable(
@@ -428,6 +471,246 @@ impl EnvironmentService {
             None => error,
         }
     }
+}
+
+pub fn build_effective_variables(
+    user: &[EnvironmentVariable],
+    system: &[EnvironmentVariable],
+) -> Vec<EffectiveEnvironmentVariable> {
+    let user_by_name = user
+        .iter()
+        .map(|variable| (variable.name.to_ascii_lowercase(), variable))
+        .collect::<HashMap<_, _>>();
+    let system_by_name = system
+        .iter()
+        .map(|variable| (variable.name.to_ascii_lowercase(), variable))
+        .collect::<HashMap<_, _>>();
+    let names = user_by_name
+        .keys()
+        .chain(system_by_name.keys())
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    let mut effective = names
+        .into_iter()
+        .filter_map(|name| {
+            let user_variable = user_by_name.get(&name).copied();
+            let system_variable = system_by_name.get(&name).copied();
+
+            if is_path_variable(&name) {
+                return match (user_variable, system_variable) {
+                    (Some(user_path), Some(system_path)) => {
+                        let entries = parse_path_entries(&system_path.value)
+                            .into_iter()
+                            .chain(parse_path_entries(&user_path.value))
+                            .collect::<Vec<_>>();
+                        Some(EffectiveEnvironmentVariable {
+                            name: user_path.name.clone(),
+                            value: join_path_entries(&entries),
+                            value_type: if user_path.value_type
+                                == EnvironmentValueType::ExpandableString
+                                || system_path.value_type == EnvironmentValueType::ExpandableString
+                            {
+                                EnvironmentValueType::ExpandableString
+                            } else {
+                                EnvironmentValueType::String
+                            },
+                            source: EffectiveVariableSource::Combined,
+                            shadowed: false,
+                            conflict: false,
+                        })
+                    }
+                    (Some(variable), None) => Some(effective_from_single(
+                        variable,
+                        EffectiveVariableSource::User,
+                    )),
+                    (None, Some(variable)) => Some(effective_from_single(
+                        variable,
+                        EffectiveVariableSource::System,
+                    )),
+                    (None, None) => None,
+                };
+            }
+
+            match (user_variable, system_variable) {
+                (Some(user_variable), Some(system_variable)) => {
+                    Some(EffectiveEnvironmentVariable {
+                        name: user_variable.name.clone(),
+                        value: user_variable.value.clone(),
+                        value_type: user_variable.value_type,
+                        source: EffectiveVariableSource::User,
+                        shadowed: true,
+                        conflict: user_variable.value != system_variable.value
+                            || user_variable.value_type != system_variable.value_type,
+                    })
+                }
+                (Some(variable), None) => Some(effective_from_single(
+                    variable,
+                    EffectiveVariableSource::User,
+                )),
+                (None, Some(variable)) => Some(effective_from_single(
+                    variable,
+                    EffectiveVariableSource::System,
+                )),
+                (None, None) => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    effective.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    effective
+}
+
+fn effective_from_single(
+    variable: &EnvironmentVariable,
+    source: EffectiveVariableSource,
+) -> EffectiveEnvironmentVariable {
+    EffectiveEnvironmentVariable {
+        name: variable.name.clone(),
+        value: variable.value.clone(),
+        value_type: variable.value_type,
+        source,
+        shadowed: false,
+        conflict: false,
+    }
+}
+
+pub fn environment_revision(
+    user: &[EnvironmentVariable],
+    system: &[EnvironmentVariable],
+) -> String {
+    let mut records = user
+        .iter()
+        .map(|variable| (EnvironmentScope::User, variable))
+        .chain(
+            system
+                .iter()
+                .map(|variable| (EnvironmentScope::System, variable)),
+        )
+        .collect::<Vec<_>>();
+    records.sort_by(|(left_scope, left), (right_scope, right)| {
+        scope_order(*left_scope)
+            .cmp(&scope_order(*right_scope))
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| {
+                value_type_order(left.value_type).cmp(&value_type_order(right.value_type))
+            })
+            .then_with(|| left.value.cmp(&right.value))
+    });
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for (scope, variable) in records {
+        hash_revision_field(&mut hash, &[scope_order(scope)]);
+        hash_revision_field(&mut hash, variable.name.to_ascii_lowercase().as_bytes());
+        hash_revision_field(&mut hash, variable.name.as_bytes());
+        hash_revision_field(&mut hash, &[value_type_order(variable.value_type)]);
+        hash_revision_field(&mut hash, variable.value.as_bytes());
+    }
+    format!("{hash:016x}")
+}
+
+fn scope_order(scope: EnvironmentScope) -> u8 {
+    match scope {
+        EnvironmentScope::User => 0,
+        EnvironmentScope::System => 1,
+    }
+}
+
+fn value_type_order(value_type: EnvironmentValueType) -> u8 {
+    match value_type {
+        EnvironmentValueType::String => 0,
+        EnvironmentValueType::ExpandableString => 1,
+    }
+}
+
+fn hash_revision_field(hash: &mut u64, value: &[u8]) {
+    for byte in (value.len() as u64).to_le_bytes().iter().chain(value) {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+}
+
+pub fn compose_process_environment(
+    base: &[(String, String)],
+    user: &[EnvironmentVariable],
+    system: &[EnvironmentVariable],
+) -> Vec<(String, String)> {
+    let mut composed = HashMap::<String, (String, String)>::new();
+    for (name, value) in base {
+        composed.insert(name.to_ascii_lowercase(), (name.clone(), value.clone()));
+    }
+    for variable in system
+        .iter()
+        .filter(|variable| !is_path_variable(&variable.name))
+    {
+        composed.insert(
+            variable.name.to_ascii_lowercase(),
+            (variable.name.clone(), variable.value.clone()),
+        );
+    }
+    for variable in user
+        .iter()
+        .filter(|variable| !is_path_variable(&variable.name))
+    {
+        composed.insert(
+            variable.name.to_ascii_lowercase(),
+            (variable.name.clone(), variable.value.clone()),
+        );
+    }
+
+    let system_path = system
+        .iter()
+        .find(|variable| is_path_variable(&variable.name));
+    let user_path = user
+        .iter()
+        .find(|variable| is_path_variable(&variable.name));
+    if system_path.is_some() || user_path.is_some() {
+        let entries = system_path
+            .into_iter()
+            .flat_map(|variable| parse_path_entries(&variable.value))
+            .chain(
+                user_path
+                    .into_iter()
+                    .flat_map(|variable| parse_path_entries(&variable.value)),
+            )
+            .collect::<Vec<_>>();
+        let display_name = user_path
+            .or(system_path)
+            .expect("registry path was checked")
+            .name
+            .clone();
+        composed.insert(
+            "path".to_owned(),
+            (display_name, join_path_entries(&entries)),
+        );
+    }
+
+    let raw_values = composed
+        .iter()
+        .map(|(normalized_name, (_, value))| (normalized_name.clone(), value.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut result = composed
+        .into_values()
+        .map(|(name, value)| {
+            let value = expand_percent_variables(&value, &raw_values);
+            (name, value)
+        })
+        .collect::<Vec<_>>();
+    result.sort_by(|(left, _), (right, _)| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    result
 }
 
 fn expand_percent_variables(value: &str, variables: &HashMap<String, String>) -> String {
@@ -765,11 +1048,7 @@ mod tests {
         );
         let system_path = build_effective_variables(
             &[],
-            &[variable(
-                EnvironmentScope::System,
-                "PATH",
-                r"C:\SystemBin",
-            )],
+            &[variable(EnvironmentScope::System, "PATH", r"C:\SystemBin")],
         );
 
         assert_eq!(user_path[0].source, EffectiveVariableSource::User);
@@ -840,10 +1119,7 @@ mod tests {
             system[1].clone(),
             variable(EnvironmentScope::System, "ALPHA", "one"),
         ];
-        assert_ne!(
-            baseline,
-            environment_revision(&user[1..], &moved_to_system)
-        );
+        assert_ne!(baseline, environment_revision(&user[1..], &moved_to_system));
         assert_ne!(baseline, environment_revision(&system, &user));
     }
 
@@ -858,11 +1134,7 @@ mod tests {
         seed(
             &harness.state,
             EnvironmentScope::System,
-            vec![variable(
-                EnvironmentScope::System,
-                "Path",
-                r"C:\Windows",
-            )],
+            vec![variable(EnvironmentScope::System, "Path", r"C:\Windows")],
         );
 
         let snapshot = harness.service.snapshot().unwrap();
@@ -910,20 +1182,12 @@ mod tests {
         ];
         let system = vec![
             variable(EnvironmentScope::System, "Root", r"C:\System"),
-            expandable_variable(
-                EnvironmentScope::System,
-                "PATH",
-                r"%ROOT%\SystemBin",
-            ),
+            expandable_variable(EnvironmentScope::System, "PATH", r"%ROOT%\SystemBin"),
             expandable_variable(EnvironmentScope::System, "CHAIN", "%ROOT%\\chain"),
         ];
         let user = vec![
             variable(EnvironmentScope::User, "rOoT", r"C:\User"),
-            expandable_variable(
-                EnvironmentScope::User,
-                "Path",
-                r"%CHAIN%\UserBin",
-            ),
+            expandable_variable(EnvironmentScope::User, "Path", r"%CHAIN%\UserBin"),
         ];
 
         let composed = compose_process_environment(&base, &user, &system);
@@ -935,10 +1199,7 @@ mod tests {
         assert_eq!(values["root"], r"C:\User");
         assert_eq!(values["dynamic_base"], r"C:\User\dynamic");
         assert_eq!(values["chain"], r"C:\User\chain");
-        assert_eq!(
-            values["path"],
-            r"C:\User\SystemBin;C:\User\chain\UserBin"
-        );
+        assert_eq!(values["path"], r"C:\User\SystemBin;C:\User\chain\UserBin");
         assert!(!values["path"].contains("StaleBase"));
         assert_eq!(values["unknown_ref"], r"%MISSING%\bin");
     }
@@ -954,11 +1215,7 @@ mod tests {
             "Tool_Home",
             "system-tool",
         )];
-        let user = vec![variable(
-            EnvironmentScope::User,
-            "tool_home",
-            "user-tool",
-        )];
+        let user = vec![variable(EnvironmentScope::User, "tool_home", "user-tool")];
 
         let composed = compose_process_environment(&base, &user, &system);
         let normalized_names = composed
@@ -969,7 +1226,10 @@ mod tests {
 
         assert_eq!(unique_names.len(), composed.len());
         assert_eq!(normalized_names, vec!["tool_home", "zeta"]);
-        assert_eq!(composed[0], ("tool_home".to_owned(), "user-tool".to_owned()));
+        assert_eq!(
+            composed[0],
+            ("tool_home".to_owned(), "user-tool".to_owned())
+        );
     }
 
     #[test]

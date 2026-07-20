@@ -64,6 +64,19 @@ pub fn restart_as_administrator() -> Result<(), EnvironmentStoreError> {
     }
 }
 
+pub fn launch_powershell(environment: &[(String, String)]) -> Result<(), EnvironmentStoreError> {
+    #[cfg(windows)]
+    {
+        windows::launch_powershell(environment)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = environment;
+        Err(EnvironmentStoreError::UnsupportedPlatform)
+    }
+}
+
 #[cfg(not(windows))]
 struct UnsupportedEnvironmentStore;
 

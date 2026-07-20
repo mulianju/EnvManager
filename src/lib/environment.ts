@@ -78,10 +78,26 @@ export function summarizePathChanges(
 ): PathChangeSummary {
   const previousIdentities = previousEntries.map(normalizePathEntry);
   const currentIdentities = currentEntries.map(normalizePathEntry);
-  const previousSet = new Set(previousIdentities);
-  const currentSet = new Set(currentIdentities);
-  const added = currentEntries.filter((_, index) => !previousSet.has(currentIdentities[index]));
-  const removed = previousEntries.filter((_, index) => !currentSet.has(previousIdentities[index]));
+  const unmatchedEntries = (
+    entries: string[],
+    identities: string[],
+    comparisonIdentities: string[],
+  ): string[] => {
+    const available = new Map<string, number>();
+    comparisonIdentities.forEach((identity) => {
+      available.set(identity, (available.get(identity) ?? 0) + 1);
+    });
+
+    return entries.filter((_, index) => {
+      const identity = identities[index];
+      const count = available.get(identity) ?? 0;
+      if (count === 0) return true;
+      available.set(identity, count - 1);
+      return false;
+    });
+  };
+  const added = unmatchedEntries(currentEntries, currentIdentities, previousIdentities);
+  const removed = unmatchedEntries(previousEntries, previousIdentities, currentIdentities);
   const orderChanged =
     added.length === 0 &&
     removed.length === 0 &&

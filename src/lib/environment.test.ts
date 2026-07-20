@@ -103,6 +103,16 @@ describe("environment helpers", () => {
       removed: [],
       orderChanged: false,
     });
+    expect(summarizePathChanges(["C:\\Tools"], ["C:\\Tools", "c:/tools/"])).toEqual({
+      added: ["c:/tools/"],
+      removed: [],
+      orderChanged: false,
+    });
+    expect(summarizePathChanges(["C:\\Tools", "c:/tools/"], ["C:\\Tools"])).toEqual({
+      added: [],
+      removed: ["c:/tools/"],
+      orderChanged: false,
+    });
   });
 
   it("merges effective variables with User precedence and a combined PATH", () => {

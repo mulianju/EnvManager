@@ -2760,6 +2760,68 @@ mod tests {
     }
 
     #[test]
+    fn import_preview_exposes_the_environment_revision_it_was_built_against() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "VALUE", "registry")],
+        );
+        let file = TestFile::new("preview-revision", "env", b"VALUE=imported\n");
+        let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
+        let revision = harness.service.revision().unwrap();
+
+        let preview = harness.service.preview_import(&request).unwrap();
+        let preview_json = serde_json::to_value(preview).unwrap();
+
+        assert_eq!(
+            preview_json.get("environmentRevision"),
+            Some(&serde_json::json!(revision)),
+            "the apply request needs the exact Registry revision used by preview"
+        );
+    }
+
+    #[test]
+    fn apply_import_rejects_registry_changes_after_preview_without_side_effects() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "VALUE", "registry-before")],
+        );
+        let file = TestFile::new("registry-revision", "env", b"VALUE=imported\n");
+        let request = file.import_request(TransferFileFormat::DotEnv, Some(EnvironmentScope::User));
+        let preview = harness.service.preview_import(&request).unwrap();
+
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "VALUE", "registry-after")],
+        );
+        let result = harness.service.apply_import(
+            &request,
+            ImportConflictStrategy::Overwrite,
+            &preview.token,
+        );
+
+        let state = harness.state.lock().unwrap();
+        let value = state.variables[&EnvironmentScope::User][0].value.clone();
+        let outcome = (
+            matches!(result, Err(EnvironmentServiceError::ImportPreviewChanged)),
+            state.set_calls,
+            state.delete_calls,
+            state.broadcasts,
+            harness.directory.exists(),
+            value,
+        );
+        assert_eq!(
+            outcome,
+            (true, 0, 0, 0, false, "registry-after".to_owned()),
+            "a stale Registry preview must fail before backup, write, delete, or broadcast"
+        );
+    }
+
+    #[test]
     fn apply_import_rejects_missing_or_malformed_preview_tokens_without_side_effects() {
         let harness = service(false);
         let file = TestFile::new("invalid-token", "env", b"VALUE=latest\n");

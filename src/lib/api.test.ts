@@ -3,6 +3,7 @@ import type {
   EnvironmentScope,
   EnvironmentSnapshot,
   EnvironmentVariableInput,
+  ImportFileRequest,
 } from "../types";
 
 interface MutationResultContract {
@@ -30,6 +31,7 @@ describe("browser preview API contracts", () => {
   });
 
   afterEach(() => {
+    vi.doUnmock("@tauri-apps/api/core");
     vi.unstubAllGlobals();
   });
 
@@ -109,6 +111,33 @@ describe("browser preview API contracts", () => {
     await api.deleteEnvironmentVariable("user", "JAVA_HOME");
 
     expect(await api.getFavorites()).toEqual([]);
+  });
+
+  it("passes the previewed environment revision when applying an import", async () => {
+    const invoke = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const api = await import("./api");
+    const applyImport = api.applyEnvironmentImport as unknown as (
+      request: ImportFileRequest,
+      strategy: "overwrite",
+      expectedToken: string,
+      expectedRevision: string,
+    ) => Promise<unknown>;
+    const request: ImportFileRequest = {
+      path: "C:\\temp\\variables.env",
+      format: "dotEnv",
+      defaultScope: "user",
+    };
+
+    await applyImport(request, "overwrite", "preview-token", "preview-revision");
+
+    expect(invoke).toHaveBeenCalledWith("apply_environment_import", {
+      request,
+      strategy: "overwrite",
+      expectedToken: "preview-token",
+      expectedRevision: "preview-revision",
+    });
   });
 });
 

@@ -428,26 +428,7 @@ fn parse_registry(bytes: &[u8]) -> Result<Vec<EnvironmentVariable>, TransferFile
             "Missing standard registry header.",
         ));
     }
-    let mut lines = Vec::<(usize, String)>::new();
-    let mut index = 1;
-    while index < physical.len() {
-        let start = index + 1;
-        let mut line = physical[index].to_owned();
-        while line.trim_end().ends_with('\\') {
-            line = line.trim_end().trim_end_matches('\\').to_owned();
-            index += 1;
-            if index >= physical.len() {
-                return Err(TransferFileError::line(
-                    TransferFileFormat::Registry,
-                    start,
-                    "Unfinished continuation.",
-                ));
-            }
-            line.push_str(physical[index].trim());
-        }
-        lines.push((start, line));
-        index += 1;
-    }
+    let lines = registry_logical_lines(&physical)?;
 
     let mut scope = None;
     let mut variables = Vec::new();
@@ -513,6 +494,117 @@ fn parse_registry(bytes: &[u8]) -> Result<Vec<EnvironmentVariable>, TransferFile
         });
     }
     Ok(variables)
+}
+
+fn registry_logical_lines(physical: &[&str]) -> Result<Vec<(usize, String)>, TransferFileError> {
+    let mut lines = Vec::new();
+    let mut index = 1;
+    while index < physical.len() {
+        let line_number = index + 1;
+        let line = physical[index];
+        if registry_hex_payload(line.trim()).is_none() {
+            lines.push((line_number, line.to_owned()));
+            index += 1;
+            continue;
+        }
+
+        let (mut logical_line, mut continued) =
+            consume_hex_fragment(line.trim_end(), line_number, false)?;
+        while continued {
+            index += 1;
+            if index >= physical.len() {
+                return Err(TransferFileError::line(
+                    TransferFileFormat::Registry,
+                    line_number,
+                    "Unfinished hex(2) continuation.",
+                ));
+            }
+            let continuation_line = index + 1;
+            let (fragment, has_next) =
+                consume_hex_fragment(physical[index].trim(), continuation_line, true)?;
+            logical_line.push_str(fragment.trim());
+            continued = has_next;
+        }
+        lines.push((line_number, logical_line));
+        index += 1;
+    }
+    Ok(lines)
+}
+
+fn registry_hex_payload(line: &str) -> Option<&str> {
+    if !line.starts_with('"') {
+        return None;
+    }
+    let mut escaped = false;
+    for (offset, character) in line[1..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            let rest = &line[offset + 2..];
+            return rest.strip_prefix("=hex(2):");
+        }
+    }
+    None
+}
+
+fn consume_hex_fragment(
+    line: &str,
+    line_number: usize,
+    continuation_only: bool,
+) -> Result<(String, bool), TransferFileError> {
+    let trimmed = line.trim_end();
+    let (without_marker, continued) = match trimmed.strip_suffix('\\') {
+        Some(without_marker) => {
+            if without_marker.trim_end().ends_with('\\') {
+                return Err(TransferFileError::line(
+                    TransferFileFormat::Registry,
+                    line_number,
+                    "Multiple hex(2) continuation markers are not allowed.",
+                ));
+            }
+            (without_marker, true)
+        }
+        None => (trimmed, false),
+    };
+    let fragment = if continuation_only {
+        without_marker
+    } else {
+        registry_hex_payload(without_marker.trim()).ok_or_else(|| {
+            TransferFileError::line(
+                TransferFileFormat::Registry,
+                line_number,
+                "Malformed hex(2) assignment.",
+            )
+        })?
+    };
+    if !is_valid_registry_hex_fragment(fragment) {
+        return Err(TransferFileError::line(
+            TransferFileFormat::Registry,
+            line_number,
+            "Invalid character in hex(2) continuation.",
+        ));
+    }
+    Ok((without_marker.to_owned(), continued))
+}
+
+fn is_valid_registry_hex_fragment(fragment: &str) -> bool {
+    let fragment = fragment.trim();
+    if fragment.is_empty() {
+        return false;
+    }
+    let mut bytes = fragment.split(',').peekable();
+    while let Some(byte) = bytes.next() {
+        let byte = byte.trim();
+        if byte.is_empty() {
+            return fragment.ends_with(',') && bytes.peek().is_none();
+        }
+        if byte.len() != 2 || !byte.bytes().all(|character| character.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_registry_assignment(
@@ -1145,6 +1237,73 @@ NO_INTERPOLATION=$PLAIN/bin
         assert_eq!(
             parse_import_bytes(TransferFileFormat::Registry, &exported, None).unwrap(),
             variables
+        );
+    }
+
+    #[test]
+    fn registry_rejects_multiline_string_values() {
+        let text = concat!(
+            "Windows Registry Editor Version 5.00\r\n\r\n",
+            "[HKEY_CURRENT_USER\\Environment]\r\n",
+            "\"A\"=\"foo\\\r\n",
+            "bar\"\r\n"
+        );
+
+        assert_error_contains(
+            parse_import_bytes(
+                TransferFileFormat::Registry,
+                &encode_utf16le_bom(text),
+                None,
+            ),
+            "line 4",
+        );
+    }
+
+    #[test]
+    fn registry_rejects_repeated_or_cross_record_hex_continuations() {
+        let repeated_marker = concat!(
+            "Windows Registry Editor Version 5.00\r\n\r\n",
+            "[HKEY_CURRENT_USER\\Environment]\r\n",
+            "\"A\"=hex(2):41,00,\\\\\r\n",
+            "00,00\r\n"
+        );
+        assert_error_contains(
+            parse_import_bytes(
+                TransferFileFormat::Registry,
+                &encode_utf16le_bom(repeated_marker),
+                None,
+            ),
+            "line 4",
+        );
+
+        let crossed_record = concat!(
+            "Windows Registry Editor Version 5.00\r\n\r\n",
+            "[HKEY_CURRENT_USER\\Environment]\r\n",
+            "\"A\"=hex(2):41,00,\\\r\n",
+            "\"B\"=\"value\"\r\n"
+        );
+        assert_error_contains(
+            parse_import_bytes(
+                TransferFileFormat::Registry,
+                &encode_utf16le_bom(crossed_record),
+                None,
+            ),
+            "line 5",
+        );
+
+        let non_hex_fragment = concat!(
+            "Windows Registry Editor Version 5.00\r\n\r\n",
+            "[HKEY_CURRENT_USER\\Environment]\r\n",
+            "\"A\"=hex(2):41,00,\\\r\n",
+            "dead\r\n"
+        );
+        assert_error_contains(
+            parse_import_bytes(
+                TransferFileFormat::Registry,
+                &encode_utf16le_bom(non_hex_fragment),
+                None,
+            ),
+            "line 5",
         );
     }
 

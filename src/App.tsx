@@ -135,7 +135,7 @@ function App() {
   const saveVariable = async (input: EnvironmentVariableInput) => {
     const next = await perform(() => saveEnvironmentVariable(input));
     if (next) {
-      setSnapshot(next);
+      setSnapshot(next.snapshot);
       setEditor(null);
       setNotice(input.originalName ? "Variable updated." : "Variable created.");
     }
@@ -151,7 +151,7 @@ function App() {
       deleteEnvironmentVariable(input.scope, input.originalName ?? input.name),
     );
     if (next) {
-      setSnapshot(next);
+      setSnapshot(next.snapshot);
       setEditor(null);
       setNotice("Variable deleted. A backup was created.");
     }
@@ -259,7 +259,7 @@ function App() {
                   if (!window.confirm(`Restore this ${backup.scope} backup? Current values in that scope will be replaced.`)) return;
                   const next = await perform(() => restoreEnvironmentBackup(backup.id));
                   if (next) {
-                    setSnapshot(next);
+                    setSnapshot(next.snapshot);
                     setNotice("Backup restored. A rollback backup was created.");
                   }
                 }}

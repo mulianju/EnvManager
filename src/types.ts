@@ -27,6 +27,8 @@ export interface BackupSummary {
 export interface EnvironmentSnapshot {
   userVariables: EnvironmentVariable[];
   systemVariables: EnvironmentVariable[];
+  effectiveVariables: EffectiveEnvironmentVariable[];
+  revision: string;
   isElevated: boolean;
   backups: BackupSummary[];
   backupDirectory: string;
@@ -47,18 +49,68 @@ export interface PathChangeSummary {
   orderChanged: boolean;
 }
 
-export type EffectiveEnvironmentVariable =
-  | (EnvironmentVariable & {
-      source: EnvironmentScope;
-      shadowed: boolean;
-      conflict: boolean;
-    })
-  | (Omit<EnvironmentVariable, "scope"> & {
-      scope: "combined";
-      source: "combined";
-      shadowed: false;
-      conflict: false;
-    });
+export type EffectiveVariableSource = EnvironmentScope | "combined";
+
+export interface EffectiveEnvironmentVariable {
+  name: string;
+  value: string;
+  valueType: EnvironmentValueType;
+  source: EffectiveVariableSource;
+  shadowed: boolean;
+  conflict: boolean;
+}
+
+export interface MutationResult {
+  snapshot: EnvironmentSnapshot;
+  undoBackupIds: string[];
+}
+
+export type TransferMode = "copy" | "move";
+
+export interface TransferVariableInput {
+  sourceScope: EnvironmentScope;
+  targetScope: EnvironmentScope;
+  name: string;
+  mode: TransferMode;
+  overwrite: boolean;
+}
+
+export interface FavoriteKey {
+  scope: EnvironmentScope;
+  name: string;
+}
+
+export type TransferFileFormat = "json" | "dotEnv" | "registry";
+export type ImportConflictStrategy = "skipExisting" | "overwrite";
+export type ImportAction = "create" | "update" | "unchanged";
+
+export interface ImportFileRequest {
+  path: string;
+  format: TransferFileFormat;
+  defaultScope: EnvironmentScope | null;
+}
+
+export interface ExportFileRequest {
+  path: string;
+  format: TransferFileFormat;
+  scope: EnvironmentScope | null;
+}
+
+export interface ImportPreviewItem {
+  variable: EnvironmentVariable;
+  existing: EnvironmentVariable | null;
+  action: ImportAction;
+}
+
+export interface ImportPreview {
+  token: string;
+  items: ImportPreviewItem[];
+}
+
+export interface ExportSummary {
+  path: string;
+  variableCount: number;
+}
 
 export type VariableCopyFormat = "name" | "value" | "powershell";
 

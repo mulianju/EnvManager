@@ -1,8 +1,15 @@
-use crate::domain::environment::{EnvironmentScope, EnvironmentVariableInput};
+use crate::domain::environment::{
+    EnvironmentScope, EnvironmentVariableInput, TransferVariableInput, validate_variable_name,
+    variable_names_equal,
+};
 use crate::platform::{EnvironmentStoreError, restart_as_administrator};
 use crate::services::environment::{
     EnvironmentService, EnvironmentServiceError, EnvironmentSnapshot, MutationResult,
     PathEntryStatus,
+};
+use crate::services::settings::{FavoriteKey, SettingsError, SettingsStore};
+use crate::services::transfer_file::{
+    ExportFileRequest, ExportSummary, ImportConflictStrategy, ImportFileRequest, ImportPreview,
 };
 use serde::Serialize;
 use std::sync::{Mutex, MutexGuard};
@@ -40,21 +47,41 @@ impl From<EnvironmentServiceError> for ApiError {
             }
             EnvironmentServiceError::Store(_) => "registryOperationFailed",
             EnvironmentServiceError::Backup(_) => "backupOperationFailed",
-            EnvironmentServiceError::TransferFile(_) => "transferFileOperationFailed",
+            EnvironmentServiceError::TransferFile(_) => "importExportFailed",
         };
         Self::new(code, error)
     }
 }
 
+impl From<SettingsError> for ApiError {
+    fn from(error: SettingsError) -> Self {
+        Self::new("settingsOperationFailed", error)
+    }
+}
+
 pub struct AppState {
     service: Mutex<EnvironmentService>,
+    settings: SettingsStore,
 }
 
 impl AppState {
-    pub fn new(service: EnvironmentService) -> Self {
+    pub fn new(service: EnvironmentService, settings: SettingsStore) -> Self {
         Self {
             service: Mutex::new(service),
+            settings,
         }
+    }
+
+    pub fn launch_powershell(&self) -> Result<(), ApiError> {
+        self.lock_service()?
+            .launch_powershell()
+            .map_err(ApiError::from)
+    }
+
+    fn lock_service(&self) -> Result<MutexGuard<'_, EnvironmentService>, ApiError> {
+        self.service
+            .lock()
+            .map_err(|_| ApiError::new("serviceLockFailed", "Environment service access failed."))
     }
 }
 
@@ -97,6 +124,106 @@ pub fn restore_environment_backup(
 }
 
 #[tauri::command]
+pub fn undo_environment_mutation(
+    backup_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<MutationResult, ApiError> {
+    lock_service(&state)?
+        .undo_mutation(&backup_ids)
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn transfer_environment_variable(
+    input: TransferVariableInput,
+    state: State<'_, AppState>,
+) -> Result<MutationResult, ApiError> {
+    lock_service(&state)?
+        .transfer_variable(input)
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn get_environment_revision(state: State<'_, AppState>) -> Result<String, ApiError> {
+    lock_service(&state)?.revision().map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn launch_powershell(state: State<'_, AppState>) -> Result<(), ApiError> {
+    state.launch_powershell()
+}
+
+#[tauri::command]
+pub fn preview_environment_import(
+    request: ImportFileRequest,
+    state: State<'_, AppState>,
+) -> Result<ImportPreview, ApiError> {
+    lock_service(&state)?
+        .preview_import(&request)
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn apply_environment_import(
+    request: ImportFileRequest,
+    strategy: ImportConflictStrategy,
+    expected_token: String,
+    state: State<'_, AppState>,
+) -> Result<MutationResult, ApiError> {
+    lock_service(&state)?
+        .apply_import(&request, strategy, &expected_token)
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn export_environment_file(
+    request: ExportFileRequest,
+    state: State<'_, AppState>,
+) -> Result<ExportSummary, ApiError> {
+    lock_service(&state)?
+        .export_file(&request)
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn get_favorites(state: State<'_, AppState>) -> Result<Vec<FavoriteKey>, ApiError> {
+    let snapshot = lock_service(&state)?.snapshot().map_err(ApiError::from)?;
+    state
+        .settings
+        .reconcile(&snapshot.user_variables, &snapshot.system_variables)
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn toggle_favorite(
+    favorite: FavoriteKey,
+    state: State<'_, AppState>,
+) -> Result<Vec<FavoriteKey>, ApiError> {
+    validate_variable_name(&favorite.name)
+        .map_err(|error| ApiError::from(SettingsError::Validation(error)))?;
+    let snapshot = lock_service(&state)?.snapshot().map_err(ApiError::from)?;
+    let variables = match favorite.scope {
+        EnvironmentScope::User => &snapshot.user_variables,
+        EnvironmentScope::System => &snapshot.system_variables,
+    };
+    let variable = variables
+        .iter()
+        .find(|variable| variable_names_equal(&variable.name, &favorite.name))
+        .ok_or_else(|| {
+            ApiError::from(EnvironmentServiceError::VariableNotFound(
+                favorite.name.clone(),
+            ))
+        })?;
+    state
+        .settings
+        .toggle(FavoriteKey {
+            scope: favorite.scope,
+            name: variable.name.clone(),
+        })
+        .map_err(ApiError::from)
+}
+
+#[tauri::command]
 pub fn analyze_path_entries(
     entries: Vec<String>,
     state: State<'_, AppState>,
@@ -116,10 +243,7 @@ pub fn restart_elevated(app: AppHandle) -> Result<(), ApiError> {
 fn lock_service<'a>(
     state: &'a State<'_, AppState>,
 ) -> Result<MutexGuard<'a, EnvironmentService>, ApiError> {
-    state
-        .service
-        .lock()
-        .map_err(|_| ApiError::new("serviceLockFailed", "Environment service access failed."))
+    state.lock_service()
 }
 
 #[cfg(test)]

@@ -632,6 +632,19 @@ mod tests {
         }
     }
 
+    fn expandable_variable(
+        scope: EnvironmentScope,
+        name: &str,
+        value: &str,
+    ) -> EnvironmentVariable {
+        EnvironmentVariable {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            value_type: EnvironmentValueType::ExpandableString,
+            scope,
+        }
+    }
+
     fn seed(
         state: &Arc<Mutex<MemoryState>>,
         scope: EnvironmentScope,
@@ -672,6 +685,306 @@ mod tests {
             .unwrap();
         assert_eq!(actual.value, value);
         assert_eq!(actual.scope, scope);
+    }
+
+    #[test]
+    fn effective_variables_use_case_insensitive_user_precedence_and_scope_metadata() {
+        let user = vec![
+            variable(EnvironmentScope::User, "Java_Home", r"C:\UserJava"),
+            variable(EnvironmentScope::User, "USER_ONLY", "user"),
+        ];
+        let system = vec![
+            expandable_variable(EnvironmentScope::System, "JAVA_HOME", r"C:\SystemJava"),
+            variable(EnvironmentScope::System, "SYSTEM_ONLY", "system"),
+        ];
+
+        let effective = build_effective_variables(&user, &system);
+        let java_home = effective
+            .iter()
+            .find(|variable| variable_names_equal(&variable.name, "java_home"))
+            .unwrap();
+        assert_eq!(java_home.name, "Java_Home");
+        assert_eq!(java_home.value, r"C:\UserJava");
+        assert_eq!(java_home.value_type, EnvironmentValueType::String);
+        assert_eq!(java_home.source, EffectiveVariableSource::User);
+        assert!(java_home.shadowed);
+        assert!(java_home.conflict);
+
+        let user_only = effective
+            .iter()
+            .find(|variable| variable.name == "USER_ONLY")
+            .unwrap();
+        assert_eq!(user_only.source, EffectiveVariableSource::User);
+        assert!(!user_only.shadowed);
+        assert!(!user_only.conflict);
+
+        let system_only = effective
+            .iter()
+            .find(|variable| variable.name == "SYSTEM_ONLY")
+            .unwrap();
+        assert_eq!(system_only.source, EffectiveVariableSource::System);
+        assert!(!system_only.shadowed);
+        assert!(!system_only.conflict);
+    }
+
+    #[test]
+    fn effective_path_combines_system_then_user_and_preserves_expandable_type() {
+        let user = vec![expandable_variable(
+            EnvironmentScope::User,
+            "PATH",
+            r"%USER_TOOLS%;C:\UserBin",
+        )];
+        let system = vec![variable(
+            EnvironmentScope::System,
+            "Path",
+            r"C:\Windows;C:\SystemBin",
+        )];
+
+        let effective = build_effective_variables(&user, &system);
+
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].name, "PATH");
+        assert_eq!(
+            effective[0].value,
+            r"C:\Windows;C:\SystemBin;%USER_TOOLS%;C:\UserBin"
+        );
+        assert_eq!(
+            effective[0].value_type,
+            EnvironmentValueType::ExpandableString
+        );
+        assert_eq!(effective[0].source, EffectiveVariableSource::Combined);
+        assert!(!effective[0].shadowed);
+        assert!(!effective[0].conflict);
+    }
+
+    #[test]
+    fn effective_path_keeps_its_single_scope_source() {
+        let user_path = build_effective_variables(
+            &[variable(EnvironmentScope::User, "Path", r"C:\UserBin")],
+            &[],
+        );
+        let system_path = build_effective_variables(
+            &[],
+            &[variable(
+                EnvironmentScope::System,
+                "PATH",
+                r"C:\SystemBin",
+            )],
+        );
+
+        assert_eq!(user_path[0].source, EffectiveVariableSource::User);
+        assert_eq!(user_path[0].value, r"C:\UserBin");
+        assert_eq!(system_path[0].source, EffectiveVariableSource::System);
+        assert_eq!(system_path[0].value, r"C:\SystemBin");
+    }
+
+    #[test]
+    fn effective_variables_are_stably_sorted_and_keep_the_winning_display_name() {
+        let user = vec![
+            variable(EnvironmentScope::User, "beta", "user-beta"),
+            variable(EnvironmentScope::User, "Alpha_Name", "user-alpha"),
+        ];
+        let system = vec![
+            variable(EnvironmentScope::System, "ZED", "system-zed"),
+            variable(EnvironmentScope::System, "ALPHA_NAME", "system-alpha"),
+        ];
+
+        let effective = build_effective_variables(&user, &system);
+        let names = effective
+            .iter()
+            .map(|variable| variable.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["Alpha_Name", "beta", "ZED"]);
+    }
+
+    #[test]
+    fn environment_revision_is_order_independent_and_tracks_all_registry_data() {
+        let user = vec![
+            variable(EnvironmentScope::User, "ALPHA", "one"),
+            variable(EnvironmentScope::User, "BETA", "two"),
+        ];
+        let system = vec![
+            variable(EnvironmentScope::System, "GAMMA", "three"),
+            variable(EnvironmentScope::System, "DELTA", "four"),
+        ];
+        let baseline = environment_revision(&user, &system);
+
+        let mut reordered_user = user.clone();
+        reordered_user.reverse();
+        let mut reordered_system = system.clone();
+        reordered_system.reverse();
+        assert_eq!(
+            baseline,
+            environment_revision(&reordered_user, &reordered_system)
+        );
+        assert_eq!(baseline, environment_revision(&user, &system));
+
+        let mut changed_value = user.clone();
+        changed_value[0].value = "changed".to_owned();
+        assert_ne!(baseline, environment_revision(&changed_value, &system));
+
+        let mut changed_type = user.clone();
+        changed_type[0].value_type = EnvironmentValueType::ExpandableString;
+        assert_ne!(baseline, environment_revision(&changed_type, &system));
+
+        let mut changed_display_name = user.clone();
+        changed_display_name[0].name = "alpha".to_owned();
+        assert_ne!(
+            baseline,
+            environment_revision(&changed_display_name, &system)
+        );
+
+        let moved_to_system = vec![
+            system[0].clone(),
+            system[1].clone(),
+            variable(EnvironmentScope::System, "ALPHA", "one"),
+        ];
+        assert_ne!(
+            baseline,
+            environment_revision(&user[1..], &moved_to_system)
+        );
+        assert_ne!(baseline, environment_revision(&system, &user));
+    }
+
+    #[test]
+    fn snapshot_and_revision_share_the_same_raw_registry_projection() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "JAVA_HOME", r"C:\Java")],
+        );
+        seed(
+            &harness.state,
+            EnvironmentScope::System,
+            vec![variable(
+                EnvironmentScope::System,
+                "Path",
+                r"C:\Windows",
+            )],
+        );
+
+        let snapshot = harness.service.snapshot().unwrap();
+
+        assert_eq!(
+            snapshot.effective_variables,
+            build_effective_variables(&snapshot.user_variables, &snapshot.system_variables)
+        );
+        assert_eq!(
+            snapshot.revision,
+            environment_revision(&snapshot.user_variables, &snapshot.system_variables)
+        );
+        assert_eq!(harness.service.revision().unwrap(), snapshot.revision);
+    }
+
+    #[test]
+    fn revision_does_not_read_or_parse_the_backup_list() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "TOOLS_HOME", r"C:\Tools")],
+        );
+        std::fs::create_dir_all(&harness.directory).unwrap();
+        std::fs::write(harness.directory.join("invalid.json"), b"not json").unwrap();
+
+        let revision = harness.service.revision().unwrap();
+
+        assert_eq!(
+            revision,
+            environment_revision(
+                &[variable(EnvironmentScope::User, "TOOLS_HOME", r"C:\Tools")],
+                &[]
+            )
+        );
+    }
+
+    #[test]
+    fn process_environment_composes_precedence_path_and_recursive_expansion() {
+        let base = vec![
+            ("DYNAMIC_BASE".to_owned(), "%Root%\\dynamic".to_owned()),
+            ("ROOT".to_owned(), r"C:\Base".to_owned()),
+            ("Path".to_owned(), r"C:\StaleBase".to_owned()),
+            ("UNKNOWN_REF".to_owned(), "%MISSING%\\bin".to_owned()),
+        ];
+        let system = vec![
+            variable(EnvironmentScope::System, "Root", r"C:\System"),
+            expandable_variable(
+                EnvironmentScope::System,
+                "PATH",
+                r"%ROOT%\SystemBin",
+            ),
+            expandable_variable(EnvironmentScope::System, "CHAIN", "%ROOT%\\chain"),
+        ];
+        let user = vec![
+            variable(EnvironmentScope::User, "rOoT", r"C:\User"),
+            expandable_variable(
+                EnvironmentScope::User,
+                "Path",
+                r"%CHAIN%\UserBin",
+            ),
+        ];
+
+        let composed = compose_process_environment(&base, &user, &system);
+        let values = composed
+            .iter()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.as_str()))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(values["root"], r"C:\User");
+        assert_eq!(values["dynamic_base"], r"C:\User\dynamic");
+        assert_eq!(values["chain"], r"C:\User\chain");
+        assert_eq!(
+            values["path"],
+            r"C:\User\SystemBin;C:\User\chain\UserBin"
+        );
+        assert!(!values["path"].contains("StaleBase"));
+        assert_eq!(values["unknown_ref"], r"%MISSING%\bin");
+    }
+
+    #[test]
+    fn process_environment_is_case_unique_sorted_and_keeps_user_display_names() {
+        let base = vec![
+            ("zeta".to_owned(), "base-zeta".to_owned()),
+            ("TOOL_HOME".to_owned(), "base-tool".to_owned()),
+        ];
+        let system = vec![variable(
+            EnvironmentScope::System,
+            "Tool_Home",
+            "system-tool",
+        )];
+        let user = vec![variable(
+            EnvironmentScope::User,
+            "tool_home",
+            "user-tool",
+        )];
+
+        let composed = compose_process_environment(&base, &user, &system);
+        let normalized_names = composed
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let unique_names = normalized_names.iter().collect::<HashSet<_>>();
+
+        assert_eq!(unique_names.len(), composed.len());
+        assert_eq!(normalized_names, vec!["tool_home", "zeta"]);
+        assert_eq!(composed[0], ("tool_home".to_owned(), "user-tool".to_owned()));
+    }
+
+    #[test]
+    fn process_environment_bounds_cyclic_percent_expansion() {
+        let user = vec![
+            expandable_variable(EnvironmentScope::User, "A", "%B%"),
+            expandable_variable(EnvironmentScope::User, "B", "%A%"),
+        ];
+        let started_at = std::time::Instant::now();
+
+        let composed = compose_process_environment(&[], &user, &[]);
+
+        assert!(started_at.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(composed.len(), 2);
+        assert!(composed.iter().all(|(_, value)| value.contains('%')));
     }
 
     #[test]

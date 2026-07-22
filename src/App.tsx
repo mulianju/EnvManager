@@ -5,6 +5,8 @@ import {
   DatabaseBackup,
   Eye,
   EyeOff,
+  FileDown,
+  FileUp,
   History,
   LoaderCircle,
   LockKeyhole,
@@ -23,6 +25,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 import { PathEditor } from "./components/PathEditor";
+import { TransferDialog, type TransferDialogMode } from "./components/TransferDialog";
 import { EffectiveVariablesView, VariablesView } from "./components/VariableViews";
 import {
   apiErrorCode,
@@ -92,6 +95,7 @@ function App() {
   const [favorites, setFavorites] = useState<FavoriteKey[]>([]);
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<EditorSession | null>(null);
+  const [transferMode, setTransferMode] = useState<TransferDialogMode | null>(null);
   const [activeMenuKey, setActiveMenuKey] = useState<string | null>(null);
   const [deferredRevision, setDeferredRevision] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -141,7 +145,7 @@ function App() {
     void refresh();
   }, [refresh]);
 
-  const interactionOpen = Boolean(editor || activeMenuKey);
+  const interactionOpen = Boolean(editor || activeMenuKey || transferMode);
   useEffect(() => {
     interactionOpenRef.current = interactionOpen;
   }, [interactionOpen]);
@@ -473,6 +477,30 @@ function App() {
                 <input aria-label="Search variables" placeholder="Search" value={query} onChange={(event) => setQuery(event.target.value)} />
               </label>
             )}
+            <div className="transfer-actions" role="group" aria-label="Import and export">
+              <button
+                className="secondary-button compact-button"
+                disabled={loading || busy || !snapshot}
+                onClick={() => {
+                  setActiveMenuKey(null);
+                  setTransferMode("import");
+                }}
+                type="button"
+              >
+                <FileUp size={15} /> Import
+              </button>
+              <button
+                className="secondary-button compact-button"
+                disabled={loading || busy || !snapshot}
+                onClick={() => {
+                  setActiveMenuKey(null);
+                  setTransferMode("export");
+                }}
+                type="button"
+              >
+                <FileDown size={15} /> Export
+              </button>
+            </div>
             <button className="icon-button" disabled={loading || busy} onClick={() => void requestRefresh()} title="Refresh" type="button">
               <RefreshCw className={loading ? "spin" : ""} size={17} />
             </button>
@@ -573,6 +601,22 @@ function App() {
           onDelete={() => void deleteVariable(editor.input, editor.expectedRevision)}
           onError={setError}
           onSave={(input) => void saveVariable(input, editor.expectedRevision)}
+        />
+      )}
+      {transferMode && snapshot && (
+        <TransferDialog
+          isElevated={snapshot.isElevated}
+          mode={transferMode}
+          onClose={() => setTransferMode(null)}
+          onImported={acceptMutation}
+          onNotice={(message) => {
+            setError(null);
+            setNotice({ message });
+          }}
+          onRestartElevated={async () => {
+            await restartElevated();
+            await refresh();
+          }}
         />
       )}
     </div>

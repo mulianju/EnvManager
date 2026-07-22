@@ -227,6 +227,18 @@
 .quick-footer.success { color: #176247; background: #edf8f2; }
 .quick-footer.warning { color: #785a19; background: #fff8e8; }
 
+.quick-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 @media (max-width: 350px) {
   .quick-header { padding: 0 9px; }
   .quick-search { margin-right: 9px; margin-left: 9px; }

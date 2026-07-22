@@ -22,9 +22,11 @@ import {
 } from "./lib/api";
 import {
   buildQuickRows,
+  commitQuickDisclosure,
   nextQuickSelectedId,
   quickCopyValue,
   quickDisplayValue,
+  quickSelectionAnnouncement,
   resetQuickDisclosure,
   shouldHandleQuickKey,
   shouldRefreshQuick,
@@ -72,6 +74,7 @@ export function QuickPanel() {
     [snapshot, favorites, query],
   );
   const selectedIndex = rows.findIndex(({ id }) => id === selectedRowId);
+  const selectedRow = selectedIndex >= 0 ? rows[selectedIndex] : null;
 
   const refresh = useCallback(async (showLoading: boolean) => {
     const generation = ++requestGeneration.current;
@@ -91,6 +94,7 @@ export function QuickPanel() {
     if (!mountedRef.current || generation !== requestGeneration.current) return;
 
     if (snapshotResult.status === "fulfilled") {
+      setRevealedRows(commitQuickDisclosure);
       snapshotRef.current = snapshotResult.value;
       setSnapshot(snapshotResult.value);
     } else {
@@ -294,6 +298,7 @@ export function QuickPanel() {
               ref={(element) => { rowRefs.current[index] = element; }}
               className={`quick-row${selectedRowId === row.id ? " selected" : ""}`}
               role="listitem"
+              aria-current={selectedRowId === row.id ? "true" : undefined}
               onClick={() => setSelectedRowId(row.id)}
             >
               <div className="quick-row-content">
@@ -316,6 +321,7 @@ export function QuickPanel() {
                     type="button"
                     title={revealed ? "Hide value" : "Reveal value"}
                     aria-label={revealed ? `Hide ${row.name}` : `Reveal ${row.name}`}
+                    disabled={loading || refreshing}
                     onClick={(event) => {
                       event.stopPropagation();
                       setRevealedRows((current) => {
@@ -347,6 +353,15 @@ export function QuickPanel() {
           );
         })}
       </section>
+
+      <div
+        className="quick-sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {quickSelectionAnnouncement(selectedRow)}
+      </div>
 
       <footer
         className={`quick-footer${error ? " error" : notice ? ` ${notice.tone}` : ""}`}

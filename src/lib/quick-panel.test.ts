@@ -5,11 +5,13 @@ import type {
 } from "../types";
 import {
   buildQuickRows,
+  commitQuickDisclosure,
   nextQuickSelectedId,
   nextQuickSelection,
   quickCopyValue,
   quickDisplayValue,
   quickFavoriteKey,
+  quickSelectionAnnouncement,
   resetQuickDisclosure,
   shouldHandleQuickKey,
   shouldRefreshQuick,
@@ -153,6 +155,28 @@ describe("quick panel sensitive disclosure", () => {
 
     expect(reset).toEqual(new Set());
     expect(previous).toEqual(new Set(["user:Z_USER_TOKEN"]));
+  });
+
+  it("commits every refreshed snapshot with empty disclosure state", () => {
+    expect(commitQuickDisclosure(new Set(["user:Z_USER_TOKEN"])))
+      .toEqual(new Set());
+  });
+});
+
+describe("quick panel selection announcement", () => {
+  it("announces only identity and source for sensitive and regular rows", () => {
+    const rows = buildQuickRows(effectiveVariables, [], "");
+    const sensitive = rows.find(({ name }) => name === "Z_USER_TOKEN")!;
+    const regular = rows.find(({ name }) => name === "JAVA_HOME")!;
+
+    expect(quickSelectionAnnouncement(sensitive)).toBe(
+      "Selected Z_USER_TOKEN, user. Press Enter to copy.",
+    );
+    expect(quickSelectionAnnouncement(sensitive)).not.toContain("raw-secret");
+    expect(quickSelectionAnnouncement(regular)).toBe(
+      "Selected JAVA_HOME, user. Press Enter to copy.",
+    );
+    expect(quickSelectionAnnouncement(null)).toBe("");
   });
 });
 

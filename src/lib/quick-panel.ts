@@ -120,6 +120,20 @@ export function resetQuickDisclosure(
   return new Set();
 }
 
+export function commitQuickDisclosure(
+  revealedRows: ReadonlySet<string>,
+): Set<string> {
+  return resetQuickDisclosure(revealedRows);
+}
+
+export function quickSelectionAnnouncement(
+  row: Pick<QuickPanelRow, "name" | "source"> | null,
+): string {
+  return row
+    ? `Selected ${row.name}, ${row.source}. Press Enter to copy.`
+    : "";
+}
+
 export function shouldRefreshQuick(
   currentRevision: string,
   observedRevision: string,

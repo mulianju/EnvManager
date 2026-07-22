@@ -88,30 +88,77 @@ describe("environment helpers", () => {
     ).toEqual({
       added: ["E:\\New"],
       removed: ["D:\\Old"],
+      moved: [],
       orderChanged: false,
     });
     expect(
       summarizePathChanges(["C:\\One", "D:\\Two"], ["D:/Two/", "c:/one/"]),
-    ).toEqual({ added: [], removed: [], orderChanged: true });
+    ).toEqual({
+      added: [],
+      removed: [],
+      moved: [
+        { value: "D:/Two/", fromIndex: 1, toIndex: 0 },
+        { value: "c:/one/", fromIndex: 0, toIndex: 1 },
+      ],
+      orderChanged: true,
+    });
     expect(summarizePathChanges(["C:\\Tools\\"], ["c:/TOOLS"])).toEqual({
       added: [],
       removed: [],
+      moved: [],
       orderChanged: false,
     });
     expect(summarizePathChanges([], [])).toEqual({
       added: [],
       removed: [],
+      moved: [],
       orderChanged: false,
     });
     expect(summarizePathChanges(["C:\\Tools"], ["C:\\Tools", "c:/tools/"])).toEqual({
       added: ["c:/tools/"],
       removed: [],
+      moved: [],
       orderChanged: false,
     });
     expect(summarizePathChanges(["C:\\Tools", "c:/tools/"], ["C:\\Tools"])).toEqual({
       added: [],
       removed: ["c:/tools/"],
+      moved: [],
       orderChanged: false,
+    });
+  });
+
+  it("reports real reorders alongside additions and removals", () => {
+    expect(
+      summarizePathChanges(
+        ["A", "B", "C", "Removed"],
+        ["Added", "C", "B", "A"],
+      ),
+    ).toEqual({
+      added: ["Added"],
+      removed: ["Removed"],
+      moved: [
+        { value: "C", fromIndex: 2, toIndex: 1 },
+        { value: "A", fromIndex: 0, toIndex: 3 },
+      ],
+      orderChanged: true,
+    });
+  });
+
+  it("matches duplicate PATH occurrences by occurrence rank when finding moves", () => {
+    expect(
+      summarizePathChanges(
+        ["C:\\A", "c:/a/", "D:\\B"],
+        ["C:\\A", "D:\\B", "c:\\a"],
+      ),
+    ).toEqual({
+      added: [],
+      removed: [],
+      moved: [
+        { value: "D:\\B", fromIndex: 2, toIndex: 1 },
+        { value: "c:\\a", fromIndex: 1, toIndex: 2 },
+      ],
+      orderChanged: true,
     });
   });
 

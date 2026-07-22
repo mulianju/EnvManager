@@ -6,8 +6,10 @@ import {
   type DragEvent as ReactDragEvent,
 } from "react";
 import {
+  AlertCircle,
   ArrowDown,
   ArrowUp,
+  CircleHelp,
   ClipboardPaste,
   FolderCheck,
   FolderOpen,
@@ -25,7 +27,9 @@ import {
 import {
   canEditPath,
   insertPathEntries,
+  PATH_ENTRY_DRAG_MIME,
   parsePathBulkInput,
+  parsePathDragIndex,
   pathFilterCounts,
   removeDuplicatePathEntries,
   reorderPathEntries,
@@ -60,6 +64,8 @@ export function PathEditor({
   const [checking, setChecking] = useState(false);
   const [bulkInput, setBulkInput] = useState("");
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [pickerError, setPickerError] = useState<string | null>(null);
   const [filter, setFilter] = useState<PathStatusFilter>("all");
   const [pickingFolder, setPickingFolder] = useState(false);
   const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
@@ -92,6 +98,7 @@ export function PathEditor({
     const generation = ++analysisGeneration.current;
     let cancelled = false;
     setStatuses([]);
+    setAnalysisError(null);
     setChecking(true);
     const timeout = window.setTimeout(() => {
       void analyzePathEntries(entries)
@@ -102,7 +109,10 @@ export function PathEditor({
         })
         .catch((error) => {
           if (!cancelled && generation === analysisGeneration.current) {
-            onError(`PATH analysis failed: ${apiErrorMessage(error)}`);
+            const message = `PATH analysis failed: ${apiErrorMessage(error)}`;
+            setStatuses([]);
+            setAnalysisError(message);
+            onError(message);
           }
         })
         .finally(() => {
@@ -144,6 +154,7 @@ export function PathEditor({
     if (disabled) return;
     setPickingFolder(true);
     setFeedback(null);
+    setPickerError(null);
     try {
       const folder = await pickEnvironmentFolder();
       if (!folder) {
@@ -158,7 +169,9 @@ export function PathEditor({
       onChange(nextEntries);
       setFeedback("Folder added to PATH.");
     } catch (error) {
-      onError(`Folder picker failed: ${apiErrorMessage(error)}`);
+      const message = `Folder picker failed: ${apiErrorMessage(error)}`;
+      setPickerError(message);
+      onError(message);
     } finally {
       setPickingFolder(false);
     }
@@ -175,13 +188,17 @@ export function PathEditor({
   };
   const startDrag = (event: ReactDragEvent<HTMLElement>, index: number) => {
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", String(index));
+    event.dataTransfer.setData(PATH_ENTRY_DRAG_MIME, String(index));
     setDraggingIndex(index);
   };
   const dropEntry = (event: ReactDragEvent<HTMLDivElement>, targetIndex: number) => {
     event.preventDefault();
-    const sourceIndex = Number.parseInt(event.dataTransfer.getData("text/plain"), 10);
-    if (Number.isInteger(sourceIndex)) {
+    const sourceIndex = parsePathDragIndex(
+      event.dataTransfer.getData(PATH_ENTRY_DRAG_MIME),
+      entries.length,
+      draggingIndex,
+    );
+    if (sourceIndex !== null) {
       onChange(reorderPathEntries(entries, sourceIndex, targetIndex));
     }
     setDraggingIndex(null);
@@ -202,6 +219,12 @@ export function PathEditor({
           <button className="secondary-button" disabled={disabled || !bulkInput.trim()} onClick={insertBulkEntries} type="button"><ClipboardPaste size={15} /> Insert entries</button>
         </div>
         {feedback && <div className="path-feedback" role="status">{feedback}</div>}
+        {(analysisError || pickerError) && (
+          <div className="path-local-errors">
+            {analysisError && <div role="alert"><AlertCircle size={15} /><span>{analysisError}</span></div>}
+            {pickerError && <div role="alert"><AlertCircle size={15} /><span>{pickerError}</span></div>}
+          </div>
+        )}
         <div className="path-list-controls">
           <div aria-label="Filter PATH entries" className="path-filters" role="group">
             {(["all", "duplicate", "missing"] as PathStatusFilter[]).map((option) => (
@@ -213,22 +236,45 @@ export function PathEditor({
           <button className="secondary-button compact-button" disabled={disabled || checking || analyzedCounts.duplicate === 0} onClick={removeDuplicates} type="button"><Trash2 size={14} /> Remove duplicates</button>
         </div>
         <div className="path-list">
-          {visibleEntries.map(({ entry, index, status }) => (
-            <div
-              className={`path-row${status?.duplicate ? " duplicate" : ""}${status && !status.exists ? " missing" : ""}${draggingIndex === index ? " dragging" : ""}`}
-              key={index}
-              onDragEnd={() => setDraggingIndex(null)}
-              onDragOver={(event) => { if (!disabled) event.preventDefault(); }}
-              onDrop={(event) => { if (!disabled) dropEntry(event, index); }}
-            >
-              <span className="path-drag-handle" draggable={!disabled} onDragStart={(event) => startDrag(event, index)} title="Drag to reorder"><GripVertical size={15} /></span>
-              <span className="path-index">{index + 1}</span>
-              <div className="path-input"><input aria-label={`PATH entry ${index + 1}`} disabled={disabled} value={entry} onChange={(event) => update(index, event.target.value)} />{status && <small title={status.expandedValue}>{status.duplicate ? "Duplicate entry" : status.exists ? "Path exists" : "Path not found"}</small>}</div>
-              <span className={status?.duplicate || (status && !status.exists) ? "path-status warning" : "path-status valid"}>{checking && !status ? <LoaderCircle className="spin" size={15} /> : status?.exists && !status.duplicate ? <FolderCheck size={16} /> : <FolderX size={16} />}</span>
-              <div className="path-actions"><button aria-label="Move up" className="icon-button small" disabled={disabled || index === 0} onClick={() => move(index, -1)} type="button"><ArrowUp size={14} /></button><button aria-label="Move down" className="icon-button small" disabled={disabled || index === entries.length - 1} onClick={() => move(index, 1)} type="button"><ArrowDown size={14} /></button><button aria-label="Remove entry" className="icon-button small danger-icon" disabled={disabled} onClick={() => onChange(entries.filter((_, current) => current !== index))} type="button"><Trash2 size={14} /></button></div>
-            </div>
-          ))}
-          {visibleEntries.length === 0 && <div className="table-empty">{checking && filter !== "all" ? "Checking paths..." : entries.length === 0 ? "No PATH entries" : `No ${filter} entries`}</div>}
+          {visibleEntries.map(({ entry, index, status }) => {
+            const statusLabel = status
+              ? status.duplicate
+                ? "Duplicate entry"
+                : status.exists
+                  ? "Path exists"
+                  : "Path not found"
+              : checking
+                ? "Checking path..."
+                : analysisError
+                  ? "Path status unavailable"
+                  : "Path status unknown";
+            const statusClass = status
+              ? status.duplicate || !status.exists ? "warning" : "valid"
+              : "unknown";
+            const statusIcon = checking && !status
+              ? <LoaderCircle className="spin" size={15} />
+              : status
+                ? status.exists && !status.duplicate
+                  ? <FolderCheck size={16} />
+                  : <FolderX size={16} />
+                : <CircleHelp size={16} />;
+            return (
+              <div
+                className={`path-row${status?.duplicate ? " duplicate" : ""}${status && !status.exists ? " missing" : ""}${draggingIndex === index ? " dragging" : ""}`}
+                key={index}
+                onDragEnd={() => setDraggingIndex(null)}
+                onDragOver={(event) => { if (!disabled) event.preventDefault(); }}
+                onDrop={(event) => { if (!disabled) dropEntry(event, index); }}
+              >
+                <span className="path-drag-handle" draggable={!disabled} onDragStart={(event) => startDrag(event, index)} title="Drag to reorder"><GripVertical size={15} /></span>
+                <span className="path-index">{index + 1}</span>
+                <div className="path-input"><input aria-label={`PATH entry ${index + 1}`} disabled={disabled} value={entry} onChange={(event) => update(index, event.target.value)} /><small title={status?.expandedValue}>{statusLabel}</small></div>
+                <span className={`path-status ${statusClass}`}>{statusIcon}</span>
+                <div className="path-actions"><button aria-label="Move up" className="icon-button small" disabled={disabled || index === 0} onClick={() => move(index, -1)} type="button"><ArrowUp size={14} /></button><button aria-label="Move down" className="icon-button small" disabled={disabled || index === entries.length - 1} onClick={() => move(index, 1)} type="button"><ArrowDown size={14} /></button><button aria-label="Remove entry" className="icon-button small danger-icon" disabled={disabled} onClick={() => onChange(entries.filter((_, current) => current !== index))} type="button"><Trash2 size={14} /></button></div>
+              </div>
+            );
+          })}
+          {visibleEntries.length === 0 && <div className="table-empty">{filter !== "all" && currentStatuses.length === 0 ? checking ? "Checking paths..." : analysisError ? "Path status unavailable" : "Path status unknown" : entries.length === 0 ? "No PATH entries" : `No ${filter} entries`}</div>}
         </div>
       </div>
       <div className="path-change-summary" role="status">
@@ -239,7 +285,7 @@ export function PathEditor({
           <div className="path-change-groups">
             {changes.added.length > 0 && <PathChangeGroup label="Added" values={changes.added} />}
             {changes.removed.length > 0 && <PathChangeGroup label="Removed" values={changes.removed} />}
-            {changes.orderChanged && <p><strong>Order changed</strong><span>Existing entries were reordered.</span></p>}
+            {changes.moved.length > 0 && <PathChangeGroup label="Moved" values={changes.moved.map(({ value, fromIndex, toIndex }) => `${value}: #${fromIndex + 1} -> #${toIndex + 1}`)} />}
           </div>
         )}
       </div>

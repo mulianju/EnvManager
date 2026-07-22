@@ -100,6 +100,25 @@ export function reorderPathEntries(
   return nextEntries;
 }
 
+export const PATH_ENTRY_DRAG_MIME = "application/x-envmanager-path-index";
+
+export function parsePathDragIndex(
+  payload: string,
+  entryCount: number,
+  draggingIndex: number | null,
+): number | null {
+  if (!/^(?:0|[1-9]\d*)$/.test(payload)) return null;
+  const sourceIndex = Number(payload);
+  if (
+    !Number.isSafeInteger(sourceIndex) ||
+    sourceIndex >= entryCount ||
+    sourceIndex !== draggingIndex
+  ) {
+    return null;
+  }
+  return sourceIndex;
+}
+
 export function removeDuplicatePathEntries(entries: string[]): string[] {
   return deduplicatePathEntries(entries);
 }
@@ -141,34 +160,46 @@ export function summarizePathChanges(
   previousEntries: string[],
   currentEntries: string[],
 ): PathChangeSummary {
-  const previousIdentities = previousEntries.map(normalizePathEntry);
-  const currentIdentities = currentEntries.map(normalizePathEntry);
-  const unmatchedEntries = (
-    entries: string[],
-    identities: string[],
-    comparisonIdentities: string[],
-  ): string[] => {
-    const available = new Map<string, number>();
-    comparisonIdentities.forEach((identity) => {
-      available.set(identity, (available.get(identity) ?? 0) + 1);
-    });
-
-    return entries.filter((_, index) => {
-      const identity = identities[index];
-      const count = available.get(identity) ?? 0;
-      if (count === 0) return true;
-      available.set(identity, count - 1);
-      return false;
+  const occurrences = (entries: string[]) => {
+    const counts = new Map<string, number>();
+    return entries.map((value, index) => {
+      const identity = normalizePathEntry(value);
+      const occurrence = counts.get(identity) ?? 0;
+      counts.set(identity, occurrence + 1);
+      return {
+        value,
+        index,
+        key: JSON.stringify([identity, occurrence]),
+      };
     });
   };
-  const added = unmatchedEntries(currentEntries, currentIdentities, previousIdentities);
-  const removed = unmatchedEntries(previousEntries, previousIdentities, currentIdentities);
-  const orderChanged =
-    added.length === 0 &&
-    removed.length === 0 &&
-    previousIdentities.some((identity, index) => identity !== currentIdentities[index]);
+  const previous = occurrences(previousEntries);
+  const current = occurrences(currentEntries);
+  const previousKeys = new Set(previous.map(({ key }) => key));
+  const currentKeys = new Set(current.map(({ key }) => key));
+  const previousByKey = new Map(previous.map((entry) => [entry.key, entry]));
+  const previousCommon = previous.filter(({ key }) => currentKeys.has(key));
+  const currentCommon = current.filter(({ key }) => previousKeys.has(key));
+  const previousRanks = new Map(
+    previousCommon.map(({ key }, rank) => [key, rank]),
+  );
+  const added = current
+    .filter(({ key }) => !previousKeys.has(key))
+    .map(({ value }) => value);
+  const removed = previous
+    .filter(({ key }) => !currentKeys.has(key))
+    .map(({ value }) => value);
+  const moved = currentCommon.flatMap((entry, rank) => {
+    const previousEntry = previousByKey.get(entry.key);
+    if (!previousEntry || previousRanks.get(entry.key) === rank) return [];
+    return [{
+      value: entry.value,
+      fromIndex: previousEntry.index,
+      toIndex: entry.index,
+    }];
+  });
 
-  return { added, removed, orderChanged };
+  return { added, removed, moved, orderChanged: moved.length > 0 };
 }
 
 export function mergeEffectiveVariables(

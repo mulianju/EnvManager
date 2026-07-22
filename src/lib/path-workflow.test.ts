@@ -4,6 +4,7 @@ import {
   canEditPath,
   insertPathEntries,
   pathFilterCounts,
+  parsePathDragIndex,
   removeDuplicatePathEntries,
   reorderPathEntries,
 } from "./environment";
@@ -38,6 +39,15 @@ describe("PATH editor workflow", () => {
     expect(reorderPathEntries(entries, -1, 2)).toBe(entries);
     expect(reorderPathEntries(entries, 1, 4)).toBe(entries);
     expect(reorderPathEntries(entries, 2, 2)).toBe(entries);
+  });
+
+  it("accepts only the current internal drag payload", () => {
+    expect(parsePathDragIndex("1", 3, 1)).toBe(1);
+    expect(parsePathDragIndex("1junk", 3, 1)).toBeNull();
+    expect(parsePathDragIndex("-1", 3, -1)).toBeNull();
+    expect(parsePathDragIndex("3", 3, 3)).toBeNull();
+    expect(parsePathDragIndex("1", 3, 0)).toBeNull();
+    expect(parsePathDragIndex("1", 3, null)).toBeNull();
   });
 
   it("removes only normalized duplicates and keeps the first entry including missing paths", () => {

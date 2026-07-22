@@ -1,4 +1,10 @@
-import { useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   ArrowRightLeft,
   Clipboard,
@@ -57,6 +63,11 @@ export function VariablesView({
   onTransfer,
 }: VariablesViewProps) {
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!activeMenuKey) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [activeMenuKey]);
   return (
     <section className="content-section">
       <div className="table-summary"><span>{variables.length} variables</span>{query && <span>Filtered by “{query}”</span>}</div>
@@ -96,7 +107,12 @@ export function VariablesView({
                     <Ellipsis size={16} />
                   </button>
                   {menuOpen && (
-                    <div className="actions-menu" role="menu">
+                    <div
+                      className="actions-menu"
+                      onKeyDown={(event) => handleMenuKeyDown(event, () => onMenuChange(null))}
+                      ref={menuRef}
+                      role="menu"
+                    >
                       <MenuButton disabled={!canEdit || busy} icon={<Pencil size={14} />} label="Edit" onClick={() => { onMenuChange(null); onOpen(variable); }} />
                       <MenuButton disabled={busy} icon={<Clipboard size={14} />} label="Copy name" onClick={() => void onCopy(variable, "name")} />
                       <MenuButton disabled={busy} icon={<Copy size={14} />} label="Copy value" onClick={() => void onCopy(variable, "value")} />
@@ -146,7 +162,7 @@ export function EffectiveVariablesView({
       <div className="variable-table effective-table">
         <div className="variable-header effective-header"><span>Name</span><span>Value</span><span>Source</span><span /></div>
         {variables.map((variable) => {
-          const key = variable.name.toLowerCase();
+          const key = `${variable.source}:${variable.name}`;
           const sensitive = isSensitiveVariable(variable.name);
           const isRevealed = revealed.has(key);
           return (
@@ -198,7 +214,7 @@ function toggleSetValue(current: Set<string>, value: string): Set<string> {
 }
 
 function variableKey(scope: EnvironmentScope, name: string): string {
-  return `${scope}:${name.toLowerCase()}`;
+  return `${scope}:${name}`;
 }
 
 function isFavorite(
@@ -208,6 +224,33 @@ function isFavorite(
   return favorites.some(
     (favorite) =>
       favorite.scope === variable.scope &&
-      favorite.name.toLowerCase() === variable.name.toLowerCase(),
+      favorite.name === variable.name,
   );
+}
+
+function handleMenuKeyDown(
+  event: ReactKeyboardEvent<HTMLDivElement>,
+  close: () => void,
+) {
+  const items = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"),
+  );
+  if (items.length === 0) return;
+  const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+  let targetIndex: number | null = null;
+  if (event.key === "ArrowDown") targetIndex = (currentIndex + 1) % items.length;
+  if (event.key === "ArrowUp") {
+    targetIndex = (currentIndex - 1 + items.length) % items.length;
+  }
+  if (event.key === "Home") targetIndex = 0;
+  if (event.key === "End") targetIndex = items.length - 1;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    close();
+    return;
+  }
+  if (targetIndex !== null) {
+    event.preventDefault();
+    items[targetIndex].focus();
+  }
 }

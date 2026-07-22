@@ -185,6 +185,16 @@ describe("environment helpers", () => {
     expect(differentType).toMatchObject({ shadowed: true, conflict: true });
   });
 
+  it("keeps known Windows-distinct sharp-s names separate in browser preview", () => {
+    const effective = mergeEffectiveVariables(
+      [variable("ß", "lower", "user")],
+      [variable("ẞ", "upper", "system")],
+    );
+
+    expect(effective.map(({ name }) => name)).toEqual(["ẞ", "ß"]);
+    expect(effective.every(({ shadowed }) => !shadowed)).toBe(true);
+  });
+
   it("formats variable copy values and escapes unsafe PowerShell names", () => {
     const regular = variable("JAVA_HOME", "C:\\Java", "user");
     expect(formatVariableForCopy(regular, "name")).toBe("JAVA_HOME");

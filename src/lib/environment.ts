@@ -113,13 +113,15 @@ export function mergeEffectiveVariables(
   userVariables: EnvironmentVariable[],
   systemVariables: EnvironmentVariable[],
 ): EffectiveEnvironmentVariable[] {
-  const userByName = new Map(userVariables.map((variable) => [variable.name.toLowerCase(), variable]));
+  const userByName = new Map(
+    userVariables.map((variable) => [previewVariableIdentity(variable.name), variable]),
+  );
   const systemByName = new Map(
-    systemVariables.map((variable) => [variable.name.toLowerCase(), variable]),
+    systemVariables.map((variable) => [previewVariableIdentity(variable.name), variable]),
   );
   const names = [
-    ...systemVariables.map(({ name }) => name.toLowerCase()),
-    ...userVariables.map(({ name }) => name.toLowerCase()),
+    ...systemVariables.map(({ name }) => previewVariableIdentity(name)),
+    ...userVariables.map(({ name }) => previewVariableIdentity(name)),
   ];
 
   return [...new Set(names)].map((name) => {
@@ -246,6 +248,31 @@ export function revisionRefreshDecision(
 ): RevisionRefreshDecision {
   if (currentRevision === observedRevision) return "unchanged";
   return interactionOpen ? "defer" : "refresh";
+}
+
+export function shouldApplyGeneration(
+  responseGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return responseGeneration === currentGeneration;
+}
+
+export function retryTransferAfterCollision(
+  input: TransferVariableInput,
+  errorCode: string | null,
+): TransferVariableInput | null {
+  if (input.overwrite || errorCode !== "variableAlreadyExists") return null;
+  return { ...input, overwrite: true };
+}
+
+export function previewVariableNamesEqual(left: string, right: string): boolean {
+  return previewVariableIdentity(left) === previewVariableIdentity(right);
+}
+
+function previewVariableIdentity(name: string): string {
+  return Array.from(name, (character) =>
+    character === "ẞ" ? character : character.toLowerCase()
+  ).join("");
 }
 
 function scopeDisplayName(scope: EnvironmentScope): string {

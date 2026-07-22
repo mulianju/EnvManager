@@ -7,6 +7,8 @@ import {
   canTransferVariable,
   filterEffectiveVariables,
   revisionRefreshDecision,
+  retryTransferAfterCollision,
+  shouldApplyGeneration,
   transferConfirmationMessage,
 } from "./environment";
 
@@ -80,6 +82,20 @@ describe("variable view workflow", () => {
     expect(revisionRefreshDecision("rev-1", "rev-1", false)).toBe("unchanged");
     expect(revisionRefreshDecision("rev-1", "rev-2", false)).toBe("refresh");
     expect(revisionRefreshDecision("rev-1", "rev-2", true)).toBe("defer");
+  });
+
+  it("only applies the latest async generation", () => {
+    expect(shouldApplyGeneration(4, 4)).toBe(true);
+    expect(shouldApplyGeneration(3, 4)).toBe(false);
+  });
+
+  it("retries transfers with overwrite only for a collision error", () => {
+    const input = transfer("system", "copy", false);
+    expect(retryTransferAfterCollision(input, "variableAlreadyExists")).toEqual({
+      ...input,
+      overwrite: true,
+    });
+    expect(retryTransferAfterCollision(input, "registryOperationFailed")).toBeNull();
   });
 });
 

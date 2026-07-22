@@ -29,6 +29,7 @@ import "./App.css";
 import { EffectiveVariablesView, VariablesView } from "./components/VariableViews";
 import {
   analyzePathEntries,
+  apiErrorCode,
   apiErrorMessage,
   copyText,
   deleteEnvironmentVariable,
@@ -52,6 +53,8 @@ import {
   joinPathEntries,
   parsePathEntries,
   revisionRefreshDecision,
+  retryTransferAfterCollision,
+  shouldApplyGeneration,
   transferConfirmationMessage,
 } from "./lib/environment";
 import type {
@@ -71,6 +74,11 @@ type View = EnvironmentScope | "effective" | "backups";
 interface NoticeState {
   message: string;
   undoBackupIds?: string[];
+  revision?: string;
+}
+interface EditorSession {
+  input: EnvironmentVariableInput;
+  expectedRevision: string;
 }
 
 const navigation: Array<{ id: View; label: string; icon: typeof User }> = [
@@ -85,7 +93,7 @@ function App() {
   const [snapshot, setSnapshot] = useState<EnvironmentSnapshot | null>(null);
   const [favorites, setFavorites] = useState<FavoriteKey[]>([]);
   const [query, setQuery] = useState("");
-  const [editor, setEditor] = useState<EnvironmentVariableInput | null>(null);
+  const [editor, setEditor] = useState<EditorSession | null>(null);
   const [activeMenuKey, setActiveMenuKey] = useState<string | null>(null);
   const [deferredRevision, setDeferredRevision] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -93,6 +101,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const requestId = useRef(0);
+  const favoriteGeneration = useRef(0);
   const snapshotRef = useRef<EnvironmentSnapshot | null>(null);
   const interactionOpenRef = useRef(false);
   const busyRef = useRef(false);
@@ -112,11 +121,14 @@ function App() {
         commitSnapshot(next);
         setDeferredRevision(null);
       }
+      const favoritesRequest = ++favoriteGeneration.current;
       try {
         const nextFavorites = await getFavorites();
-        if (requestId.current === currentRequest) setFavorites(nextFavorites);
+        if (shouldApplyGeneration(favoritesRequest, favoriteGeneration.current)) {
+          setFavorites(nextFavorites);
+        }
       } catch (favoriteError) {
-        if (requestId.current === currentRequest) {
+        if (shouldApplyGeneration(favoritesRequest, favoriteGeneration.current)) {
           setError(`Variables loaded, but favorites could not be read: ${apiErrorMessage(favoriteError)}`);
         }
       }
@@ -160,6 +172,13 @@ function App() {
       if (!current || busyRef.current) return;
       try {
         const observedRevision = await getEnvironmentRevision();
+        if (observedRevision !== current.revision) {
+          setNotice((currentNotice) =>
+            currentNotice?.revision && currentNotice.revision !== observedRevision
+              ? null
+              : currentNotice
+          );
+        }
         const decision = revisionRefreshDecision(
           current.revision,
           observedRevision,
@@ -209,57 +228,95 @@ function App() {
   );
 
   const reconcileFavorites = async () => {
+    const generation = ++favoriteGeneration.current;
     try {
-      setFavorites(await getFavorites());
+      const next = await getFavorites();
+      if (shouldApplyGeneration(generation, favoriteGeneration.current)) {
+        setFavorites(next);
+      }
     } catch (nextError) {
-      setError(apiErrorMessage(nextError));
+      if (shouldApplyGeneration(generation, favoriteGeneration.current)) {
+        setError(apiErrorMessage(nextError));
+      }
     }
   };
 
   const acceptMutation = (result: MutationResult, message: string) => {
+    requestId.current += 1;
+    setLoading(false);
     commitSnapshot(result.snapshot);
     setDeferredRevision(null);
-    setNotice({ message, undoBackupIds: result.undoBackupIds });
+    setNotice({
+      message,
+      undoBackupIds: result.undoBackupIds,
+      revision: result.snapshot.revision,
+    });
     void reconcileFavorites();
   };
 
   const openVariable = (variable: EnvironmentVariable) => {
+    if (!snapshot) return;
     setEditor({
-      originalName: variable.name,
-      name: variable.name,
-      value: variable.value,
-      valueType: variable.valueType,
-      scope: variable.scope,
+      input: {
+        originalName: variable.name,
+        name: variable.name,
+        value: variable.value,
+        valueType: variable.valueType,
+        scope: variable.scope,
+      },
+      expectedRevision: snapshot.revision,
     });
   };
 
   const addVariable = () => {
     if (!scope) return;
+    if (!snapshot) return;
     setEditor({
-      originalName: null,
-      name: "",
-      value: "",
-      valueType: "string",
-      scope,
+      input: {
+        originalName: null,
+        name: "",
+        value: "",
+        valueType: "string",
+        scope,
+      },
+      expectedRevision: snapshot.revision,
     });
   };
 
-  const saveVariable = async (input: EnvironmentVariableInput) => {
-    const next = await perform(() => saveEnvironmentVariable(input));
+  const saveVariable = async (
+    input: EnvironmentVariableInput,
+    expectedRevision: string,
+  ) => {
+    if (deferredRevision) {
+      setError("Environment values changed. Refresh before saving this edit.");
+      return;
+    }
+    const next = await perform(() => saveEnvironmentVariable(input, expectedRevision));
     if (next) {
       acceptMutation(next, input.originalName ? "Variable updated." : "Variable created.");
       setEditor(null);
     }
   };
 
-  const deleteVariable = async (input: EnvironmentVariableInput) => {
+  const deleteVariable = async (
+    input: EnvironmentVariableInput,
+    expectedRevision: string,
+  ) => {
     if (!input.originalName) {
       setEditor(null);
       return;
     }
+    if (deferredRevision) {
+      setError("Environment values changed. Refresh before deleting this variable.");
+      return;
+    }
     if (!window.confirm(`Delete ${input.originalName} from ${input.scope} variables?`)) return;
     const next = await perform(() =>
-      deleteEnvironmentVariable(input.scope, input.originalName ?? input.name),
+      deleteEnvironmentVariable(
+        input.scope,
+        input.originalName ?? input.name,
+        expectedRevision,
+      ),
     );
     if (next) {
       acceptMutation(next, "Variable deleted. A backup was created.");
@@ -267,8 +324,10 @@ function App() {
     }
   };
 
-  const undoMutation = async (backupIds: string[]) => {
-    const next = await perform(() => undoEnvironmentMutation(backupIds));
+  const undoMutation = async (backupIds: string[], expectedRevision: string) => {
+    const next = await perform(() =>
+      undoEnvironmentMutation(backupIds, expectedRevision),
+    );
     if (next) acceptMutation(next, "Change undone. You can undo this restore too.");
   };
 
@@ -286,10 +345,11 @@ function App() {
 
   const toggleVariableFavorite = async (variable: EnvironmentVariable) => {
     setActiveMenuKey(null);
+    const generation = ++favoriteGeneration.current;
     const next = await perform(() =>
       toggleFavorite({ scope: variable.scope, name: variable.name }),
     );
-    if (next) {
+    if (next && shouldApplyGeneration(generation, favoriteGeneration.current)) {
       setFavorites(next);
       setNotice({ message: isFavorite(favorites, variable) ? "Favorite removed." : "Favorite added." });
     }
@@ -302,22 +362,37 @@ function App() {
       return;
     }
     const targetScope: EnvironmentScope = variable.scope === "user" ? "system" : "user";
-    const targetVariables = targetScope === "user"
-      ? snapshot.userVariables
-      : snapshot.systemVariables;
-    const overwrite = targetVariables.some(
-      (item) => item.name.toLowerCase() === variable.name.toLowerCase(),
-    );
     const input = {
       sourceScope: variable.scope,
       targetScope,
       name: variable.name,
       mode,
-      overwrite,
+      overwrite: false,
     };
     const confirmation = transferConfirmationMessage(input);
     if (confirmation && !window.confirm(confirmation)) return;
-    const next = await perform(() => transferEnvironmentVariable(input));
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    let next: MutationResult | null = null;
+    try {
+      try {
+        next = await transferEnvironmentVariable(input);
+      } catch (transferError) {
+        const retry = retryTransferAfterCollision(input, apiErrorCode(transferError));
+        if (!retry) throw transferError;
+        const overwriteConfirmation = transferConfirmationMessage(retry);
+        if (!overwriteConfirmation || !window.confirm(overwriteConfirmation)) return;
+        next = await transferEnvironmentVariable(retry);
+      }
+    } catch (transferError) {
+      setError(apiErrorMessage(transferError));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
     if (next) {
       acceptMutation(
         next,
@@ -427,7 +502,7 @@ function App() {
             actionLabel={notice.undoBackupIds?.length ? "Undo" : undefined}
             kind="success"
             onAction={notice.undoBackupIds?.length
-              ? () => void undoMutation(notice.undoBackupIds!)
+              ? () => void undoMutation(notice.undoBackupIds!, notice.revision!)
               : undefined}
             onClose={() => setNotice(null)}
           >
@@ -494,10 +569,10 @@ function App() {
       {editor && (
         <VariableEditor
           busy={busy}
-          input={editor}
+          input={editor.input}
           onClose={() => setEditor(null)}
-          onDelete={() => void deleteVariable(editor)}
-          onSave={(input) => void saveVariable(input)}
+          onDelete={() => void deleteVariable(editor.input, editor.expectedRevision)}
+          onSave={(input) => void saveVariable(input, editor.expectedRevision)}
         />
       )}
     </div>
@@ -650,7 +725,7 @@ function isFavorite(
   return favorites.some(
     (favorite) =>
       favorite.scope === variable.scope &&
-      favorite.name.toLowerCase() === variable.name.toLowerCase(),
+      favorite.name === variable.name,
   );
 }
 

@@ -71,6 +71,7 @@ pub enum EnvironmentServiceError {
     VariableNotFound(String),
     InvalidTransfer(String),
     ImportPreviewChanged,
+    EnvironmentChanged,
     UndoInvalid(String),
     TransactionRollbackFailed(String),
     Store(EnvironmentStoreError),
@@ -94,6 +95,9 @@ impl fmt::Display for EnvironmentServiceError {
             Self::InvalidTransfer(message) => write!(formatter, "Invalid transfer: {message}"),
             Self::ImportPreviewChanged => formatter.write_str(
                 "The import file changed after preview. Preview the file again before importing.",
+            ),
+            Self::EnvironmentChanged => formatter.write_str(
+                "Environment variables changed after this action was prepared. Refresh and try again.",
             ),
             Self::UndoInvalid(message) => write!(formatter, "Invalid undo request: {message}"),
             Self::TransactionRollbackFailed(message) => {
@@ -313,6 +317,15 @@ impl EnvironmentService {
         self.finalize_transaction(vec![backup.id], &[(input.scope, current)])
     }
 
+    pub fn set_variable_checked(
+        &self,
+        input: EnvironmentVariableInput,
+        expected_revision: &str,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        self.require_revision(expected_revision)?;
+        self.set_variable(input)
+    }
+
     pub fn delete_variable(
         &self,
         scope: EnvironmentScope,
@@ -333,6 +346,16 @@ impl EnvironmentService {
             .create(scope, "beforeDelete", current.clone())?;
         self.store.delete(scope, name)?;
         self.finalize_transaction(vec![backup.id], &[(scope, current)])
+    }
+
+    pub fn delete_variable_checked(
+        &self,
+        scope: EnvironmentScope,
+        name: &str,
+        expected_revision: &str,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        self.require_revision(expected_revision)?;
+        self.delete_variable(scope, name)
     }
 
     pub fn restore_backup(
@@ -399,6 +422,15 @@ impl EnvironmentService {
         }
 
         self.finalize_transaction(rollback_ids, &rollback_states)
+    }
+
+    pub fn undo_mutation_checked(
+        &self,
+        backup_ids: &[String],
+        expected_revision: &str,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        self.require_revision(expected_revision)?;
+        self.undo_mutation(backup_ids)
     }
 
     pub fn transfer_variable(
@@ -514,6 +546,13 @@ impl EnvironmentService {
     ) -> Result<(), EnvironmentServiceError> {
         if scope == EnvironmentScope::System && !self.store.is_elevated() {
             return Err(EnvironmentServiceError::ElevationRequired);
+        }
+        Ok(())
+    }
+
+    fn require_revision(&self, expected_revision: &str) -> Result<(), EnvironmentServiceError> {
+        if self.revision()? != expected_revision {
+            return Err(EnvironmentServiceError::EnvironmentChanged);
         }
         Ok(())
     }
@@ -1672,6 +1711,64 @@ mod tests {
     }
 
     #[test]
+    fn stale_save_and_delete_stop_before_backup_write_or_broadcast() {
+        let save_harness = service(false);
+        let save_revision = save_harness.service.revision().unwrap();
+        seed(
+            &save_harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "EXTERNAL", "change")],
+        );
+
+        let save_result = save_harness.service.set_variable_checked(
+            input(EnvironmentScope::User, "JAVA_HOME", r"C:\Java"),
+            &save_revision,
+        );
+
+        assert!(matches!(
+            save_result,
+            Err(EnvironmentServiceError::EnvironmentChanged)
+        ));
+        assert!(save_harness.service.backups.list().unwrap().is_empty());
+        let save_state = save_harness.state.lock().unwrap();
+        assert_eq!(save_state.set_calls, 0);
+        assert_eq!(save_state.delete_calls, 0);
+        assert_eq!(save_state.broadcasts, 0);
+
+        let delete_harness = service(false);
+        seed(
+            &delete_harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "JAVA_HOME", r"C:\Java")],
+        );
+        let delete_revision = delete_harness.service.revision().unwrap();
+        seed(
+            &delete_harness.state,
+            EnvironmentScope::User,
+            vec![
+                variable(EnvironmentScope::User, "JAVA_HOME", r"C:\Java"),
+                variable(EnvironmentScope::User, "EXTERNAL", "change"),
+            ],
+        );
+
+        let delete_result = delete_harness.service.delete_variable_checked(
+            EnvironmentScope::User,
+            "JAVA_HOME",
+            &delete_revision,
+        );
+
+        assert!(matches!(
+            delete_result,
+            Err(EnvironmentServiceError::EnvironmentChanged)
+        ));
+        assert!(delete_harness.service.backups.list().unwrap().is_empty());
+        let delete_state = delete_harness.state.lock().unwrap();
+        assert_eq!(delete_state.set_calls, 0);
+        assert_eq!(delete_state.delete_calls, 0);
+        assert_eq!(delete_state.broadcasts, 0);
+    }
+
+    #[test]
     fn restore_returns_a_new_rollback_backup_instead_of_the_selected_backup() {
         let harness = service(true);
         seed(
@@ -1744,6 +1841,43 @@ mod tests {
         assert_eq!(redo.scope, EnvironmentScope::User);
         assert_eq!(redo.reason, "beforeUndo");
         assert_eq!(redo.variables[0].value, "second");
+    }
+
+    #[test]
+    fn stale_undo_stops_before_backup_write_or_broadcast() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "JAVA_HOME", "first")],
+        );
+        let changed = harness
+            .service
+            .set_variable(EnvironmentVariableInput {
+                original_name: Some("JAVA_HOME".to_owned()),
+                ..input(EnvironmentScope::User, "JAVA_HOME", "second")
+            })
+            .unwrap();
+        let backup_count = harness.service.backups.list().unwrap().len();
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "JAVA_HOME", "external")],
+        );
+
+        let result = harness
+            .service
+            .undo_mutation_checked(&changed.undo_backup_ids, &changed.snapshot.revision);
+
+        assert!(matches!(
+            result,
+            Err(EnvironmentServiceError::EnvironmentChanged)
+        ));
+        assert_eq!(harness.service.backups.list().unwrap().len(), backup_count);
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 1);
+        assert_eq!(state.delete_calls, 0);
+        assert_eq!(state.broadcasts, 1);
     }
 
     #[test]

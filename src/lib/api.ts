@@ -22,6 +22,7 @@ import {
   duplicatePathEntryIndexes,
   mergeEffectiveVariables,
   normalizePathEntry,
+  previewVariableNamesEqual,
 } from "./environment";
 
 const browserPreview = typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -79,8 +80,10 @@ export async function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
 
 export async function saveEnvironmentVariable(
   input: EnvironmentVariableInput,
+  expectedRevision: string,
 ): Promise<MutationResult> {
   if (browserPreview) {
+    assertPreviewRevision(expectedRevision);
     assertPreviewPermission(input.scope);
     validatePreviewName(input.name);
     const variables = scopeVariables(input.scope);
@@ -103,14 +106,16 @@ export async function saveEnvironmentVariable(
     );
     return previewMutationResult([backupId]);
   }
-  return invoke<MutationResult>("save_environment_variable", { input });
+  return invoke<MutationResult>("save_environment_variable", { input, expectedRevision });
 }
 
 export async function deleteEnvironmentVariable(
   scope: EnvironmentScope,
   name: string,
+  expectedRevision: string,
 ): Promise<MutationResult> {
   if (browserPreview) {
+    assertPreviewRevision(expectedRevision);
     assertPreviewPermission(scope);
     validatePreviewName(name);
     const variables = scopeVariables(scope);
@@ -124,7 +129,11 @@ export async function deleteEnvironmentVariable(
     );
     return previewMutationResult([backupId]);
   }
-  return invoke<MutationResult>("delete_environment_variable", { scope, name });
+  return invoke<MutationResult>("delete_environment_variable", {
+    scope,
+    name,
+    expectedRevision,
+  });
 }
 
 export async function restoreEnvironmentBackup(backupId: string): Promise<MutationResult> {
@@ -141,8 +150,12 @@ export async function restoreEnvironmentBackup(backupId: string): Promise<Mutati
   return invoke<MutationResult>("restore_environment_backup", { backupId });
 }
 
-export async function undoEnvironmentMutation(backupIds: string[]): Promise<MutationResult> {
+export async function undoEnvironmentMutation(
+  backupIds: string[],
+  expectedRevision: string,
+): Promise<MutationResult> {
   if (browserPreview) {
+    assertPreviewRevision(expectedRevision);
     if (backupIds.length === 0) {
       throw previewError("invalidUndo", "At least one backup is required.");
     }
@@ -168,7 +181,10 @@ export async function undoEnvironmentMutation(backupIds: string[]): Promise<Muta
     });
     return previewMutationResult(rollbackIds);
   }
-  return invoke<MutationResult>("undo_environment_mutation", { backupIds });
+  return invoke<MutationResult>("undo_environment_mutation", {
+    backupIds,
+    expectedRevision,
+  });
 }
 
 export async function transferEnvironmentVariable(
@@ -366,6 +382,10 @@ export function apiErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function apiErrorCode(error: unknown): string | null {
+  return isApiError(error) ? error.code : null;
+}
+
 function scopeVariables(scope: EnvironmentScope): EnvironmentVariable[] {
   return scope === "user" ? previewSnapshot.userVariables : previewSnapshot.systemVariables;
 }
@@ -439,6 +459,15 @@ function assertPreviewPermission(scope: EnvironmentScope) {
   }
 }
 
+function assertPreviewRevision(expectedRevision: string) {
+  if (previewSnapshot.revision !== expectedRevision) {
+    throw previewError(
+      "environmentChanged",
+      "Environment variables changed. Refresh and try again.",
+    );
+  }
+}
+
 function validatePreviewName(name: string) {
   if (!name || name.includes("=") || name.includes("\0")) {
     throw previewError("invalidVariable", "Variable name is invalid.");
@@ -446,7 +475,7 @@ function validatePreviewName(name: string) {
 }
 
 function equalNames(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
+  return previewVariableNamesEqual(left, right);
 }
 
 function previewError(code: string, message: string): ApiError {

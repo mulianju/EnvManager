@@ -54,6 +54,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .permission-banner span { color: #77694f; font-size: 12px; }
 .content-section { padding-top: 18px; }
 .table-summary { min-height: 32px; display: flex; justify-content: space-between; color: #6d7983; font-size: 12px; }
+.table-summary span { min-width: 0; overflow-wrap: anywhere; }
 .variable-table, .backup-table { border: 1px solid #d7dde2; border-radius: 6px; background: #fff; }
 .backup-table { overflow: hidden; }
 .variable-header, .variable-row { display: grid; grid-template-columns: minmax(170px, 0.8fr) minmax(260px, 2fr) 110px 80px; align-items: center; gap: 12px; }

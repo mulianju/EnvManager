@@ -46,13 +46,16 @@ describe("browser preview API contracts", () => {
       scope: "user",
     };
 
-    const saved = await api.saveEnvironmentVariable(input);
+    const saved = await api.saveEnvironmentVariable(input, before.revision);
 
     expectMutationResult(saved);
     expect(saved.snapshot.revision).not.toBe(before.revision);
     expect(findValue(saved.snapshot, "user", "JAVA_HOME")).toBe(input.value);
 
-    const undone = await api.undoEnvironmentMutation(saved.undoBackupIds);
+    const undone = await api.undoEnvironmentMutation(
+      saved.undoBackupIds,
+      saved.snapshot.revision,
+    );
 
     expectMutationResult(undone);
     expect(findValue(undone.snapshot, "user", "JAVA_HOME")).toBe(
@@ -96,7 +99,7 @@ describe("browser preview API contracts", () => {
     expect(typeof before).toBe("string");
     expect(before).toBe(snapshot.revision);
 
-    await api.deleteEnvironmentVariable("user", "JAVA_HOME");
+    await api.deleteEnvironmentVariable("user", "JAVA_HOME", snapshot.revision);
 
     expect(await api.getEnvironmentRevision()).not.toBe(before);
   });
@@ -108,7 +111,8 @@ describe("browser preview API contracts", () => {
     expect(await api.getFavorites()).toEqual([]);
     expect(await api.toggleFavorite(favorite)).toEqual([favorite]);
 
-    await api.deleteEnvironmentVariable("user", "JAVA_HOME");
+    const snapshot = await api.getEnvironmentSnapshot();
+    await api.deleteEnvironmentVariable("user", "JAVA_HOME", snapshot.revision);
 
     expect(await api.getFavorites()).toEqual([]);
   });
@@ -156,7 +160,10 @@ describe("browser preview API contracts", () => {
 
     await api.transferEnvironmentVariable(input);
     await api.toggleFavorite(favorite);
-    await api.undoEnvironmentMutation(["user-backup", "system-backup"]);
+    await api.undoEnvironmentMutation(
+      ["user-backup", "system-backup"],
+      "expected-revision",
+    );
 
     expect(invoke).toHaveBeenNthCalledWith(1, "transfer_environment_variable", {
       input,
@@ -164,7 +171,60 @@ describe("browser preview API contracts", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "toggle_favorite", { favorite });
     expect(invoke).toHaveBeenNthCalledWith(3, "undo_environment_mutation", {
       backupIds: ["user-backup", "system-backup"],
+      expectedRevision: "expected-revision",
     });
+  });
+
+  it("passes editor revisions through save and delete commands", async () => {
+    const invoke = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const api = await import("./api");
+    const input: EnvironmentVariableInput = {
+      originalName: "JAVA_HOME",
+      name: "JAVA_HOME",
+      value: "C:\\Java",
+      valueType: "string",
+      scope: "user",
+    };
+
+    await api.saveEnvironmentVariable(input, "editor-revision");
+    await api.deleteEnvironmentVariable("user", "JAVA_HOME", "editor-revision");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "save_environment_variable", {
+      input,
+      expectedRevision: "editor-revision",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "delete_environment_variable", {
+      scope: "user",
+      name: "JAVA_HOME",
+      expectedRevision: "editor-revision",
+    });
+    expect(api.apiErrorCode({ code: "variableAlreadyExists", message: "collision" }))
+      .toBe("variableAlreadyExists");
+  });
+
+  it("rejects stale save delete and undo receipts in browser preview", async () => {
+    const api = await loadPreviewApi();
+    const snapshot = await api.getEnvironmentSnapshot();
+    const input: EnvironmentVariableInput = {
+      originalName: "JAVA_HOME",
+      name: "JAVA_HOME",
+      value: "changed",
+      valueType: "string",
+      scope: "user",
+    };
+
+    await expect(api.saveEnvironmentVariable(input, "stale")).rejects.toMatchObject({
+      code: "environmentChanged",
+    });
+    await expect(
+      api.deleteEnvironmentVariable("user", "JAVA_HOME", "stale"),
+    ).rejects.toMatchObject({ code: "environmentChanged" });
+    await expect(
+      api.undoEnvironmentMutation(["missing"], "stale"),
+    ).rejects.toMatchObject({ code: "environmentChanged" });
+    expect(await api.getEnvironmentSnapshot()).toEqual(snapshot);
   });
 });
 
@@ -172,7 +232,10 @@ async function loadPreviewApi() {
   const api = await import("./api");
   return api as typeof api & {
     getEnvironmentRevision(): Promise<string>;
-    undoEnvironmentMutation(backupIds: string[]): Promise<MutationResultContract>;
+    undoEnvironmentMutation(
+      backupIds: string[],
+      expectedRevision: string,
+    ): Promise<MutationResultContract>;
     transferEnvironmentVariable(
       input: TransferVariableInputContract,
     ): Promise<MutationResultContract>;
@@ -180,10 +243,12 @@ async function loadPreviewApi() {
     toggleFavorite(favorite: FavoriteKeyContract): Promise<FavoriteKeyContract[]>;
     saveEnvironmentVariable(
       input: EnvironmentVariableInput,
+      expectedRevision: string,
     ): Promise<MutationResultContract>;
     deleteEnvironmentVariable(
       scope: EnvironmentScope,
       name: string,
+      expectedRevision: string,
     ): Promise<MutationResultContract>;
   };
 }

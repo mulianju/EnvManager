@@ -40,6 +40,7 @@ impl From<EnvironmentServiceError> for ApiError {
             EnvironmentServiceError::VariableNotFound(_) => "variableNotFound",
             EnvironmentServiceError::InvalidTransfer(_) => "invalidTransfer",
             EnvironmentServiceError::ImportPreviewChanged => "importPreviewChanged",
+            EnvironmentServiceError::EnvironmentChanged => "environmentChanged",
             EnvironmentServiceError::UndoInvalid(_) => "invalidUndo",
             EnvironmentServiceError::TransactionRollbackFailed(_) => "transactionRollbackFailed",
             EnvironmentServiceError::Store(EnvironmentStoreError::AccessDenied) => {
@@ -95,10 +96,11 @@ pub fn get_environment_snapshot(
 #[tauri::command]
 pub fn save_environment_variable(
     input: EnvironmentVariableInput,
+    expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
-        .set_variable(input)
+        .set_variable_checked(input, &expected_revision)
         .map_err(ApiError::from)
 }
 
@@ -106,10 +108,11 @@ pub fn save_environment_variable(
 pub fn delete_environment_variable(
     scope: EnvironmentScope,
     name: String,
+    expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
-        .delete_variable(scope, &name)
+        .delete_variable_checked(scope, &name, &expected_revision)
         .map_err(ApiError::from)
 }
 
@@ -126,10 +129,11 @@ pub fn restore_environment_backup(
 #[tauri::command]
 pub fn undo_environment_mutation(
     backup_ids: Vec<String>,
+    expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
-        .undo_mutation(&backup_ids)
+        .undo_mutation_checked(&backup_ids, &expected_revision)
         .map_err(ApiError::from)
 }
 
@@ -272,6 +276,10 @@ mod tests {
             (
                 EnvironmentServiceError::ImportPreviewChanged,
                 "importPreviewChanged",
+            ),
+            (
+                EnvironmentServiceError::EnvironmentChanged,
+                "environmentChanged",
             ),
             (
                 EnvironmentServiceError::InvalidTransfer("same scope".to_owned()),

@@ -62,6 +62,68 @@ export function deduplicatePathEntries(entries: string[]): string[] {
   });
 }
 
+export function insertPathEntries(
+  existingEntries: string[],
+  input: string,
+): string[] {
+  const nextEntries = [...existingEntries];
+  const seen = new Set(existingEntries.map(normalizePathEntry));
+
+  parsePathBulkInput(input).forEach((entry) => {
+    const identity = normalizePathEntry(entry);
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    nextEntries.push(entry);
+  });
+
+  return nextEntries.length === existingEntries.length ? existingEntries : nextEntries;
+}
+
+export function reorderPathEntries(
+  entries: string[],
+  sourceIndex: number,
+  targetIndex: number,
+): string[] {
+  if (
+    sourceIndex < 0 ||
+    sourceIndex >= entries.length ||
+    targetIndex < 0 ||
+    targetIndex >= entries.length ||
+    sourceIndex === targetIndex
+  ) {
+    return entries;
+  }
+
+  const nextEntries = [...entries];
+  const [entry] = nextEntries.splice(sourceIndex, 1);
+  nextEntries.splice(targetIndex, 0, entry);
+  return nextEntries;
+}
+
+export function removeDuplicatePathEntries(entries: string[]): string[] {
+  return deduplicatePathEntries(entries);
+}
+
+export function pathFilterCounts(statuses: PathEntryStatus[]): {
+  all: number;
+  duplicate: number;
+  missing: number;
+} {
+  return {
+    all: statuses.length,
+    duplicate: statuses.filter(({ duplicate }) => duplicate).length,
+    missing: statuses.filter(({ exists }) => !exists).length,
+  };
+}
+
+export function canEditPath(
+  scope: EnvironmentScope,
+  isElevated: boolean,
+  busy: boolean,
+): boolean {
+  return !busy && (scope === "user" || isElevated);
+}
+
 export function filterPathEntryStatuses(
   statuses: PathEntryStatus[],
   filter: PathStatusFilter,

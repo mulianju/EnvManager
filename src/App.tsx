@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
-  ArrowDown,
-  ArrowUp,
   Check,
   DatabaseBackup,
   Eye,
   EyeOff,
-  FolderCheck,
-  FolderX,
   History,
   LoaderCircle,
   LockKeyhole,
@@ -26,9 +22,9 @@ import {
   X,
 } from "lucide-react";
 import "./App.css";
+import { PathEditor } from "./components/PathEditor";
 import { EffectiveVariablesView, VariablesView } from "./components/VariableViews";
 import {
-  analyzePathEntries,
   apiErrorCode,
   apiErrorMessage,
   copyText,
@@ -44,6 +40,7 @@ import {
   undoEnvironmentMutation,
 } from "./lib/api";
 import {
+  canEditPath,
   canTransferVariable,
   filterEffectiveVariables,
   filterVariables,
@@ -65,7 +62,6 @@ import type {
   EnvironmentVariableInput,
   FavoriteKey,
   MutationResult,
-  PathEntryStatus,
   TransferMode,
   VariableCopyFormat,
 } from "./types";
@@ -570,8 +566,10 @@ function App() {
         <VariableEditor
           busy={busy}
           input={editor.input}
+          isElevated={snapshot?.isElevated ?? false}
           onClose={() => setEditor(null)}
           onDelete={() => void deleteVariable(editor.input, editor.expectedRevision)}
+          onError={setError}
           onSave={(input) => void saveVariable(input, editor.expectedRevision)}
         />
       )}
@@ -600,24 +598,13 @@ function BackupsView({ snapshot, busy, onRestore }: { snapshot: EnvironmentSnaps
   );
 }
 
-function VariableEditor({ input, busy, onSave, onDelete, onClose }: { input: EnvironmentVariableInput; busy: boolean; onSave: (input: EnvironmentVariableInput) => void; onDelete: () => void; onClose: () => void }) {
+function VariableEditor({ input, busy, isElevated, onSave, onDelete, onClose, onError }: { input: EnvironmentVariableInput; busy: boolean; isElevated: boolean; onSave: (input: EnvironmentVariableInput) => void; onDelete: () => void; onClose: () => void; onError: (message: string) => void }) {
   const [draft, setDraft] = useState(input);
-  const [pathEntries, setPathEntries] = useState(() => parsePathEntries(input.value));
-  const [statuses, setStatuses] = useState<PathEntryStatus[]>([]);
-  const [checkingPaths, setCheckingPaths] = useState(false);
+  const [originalPathEntries] = useState(() => parsePathEntries(input.value));
+  const [pathEntries, setPathEntries] = useState(originalPathEntries);
   const [showSensitive, setShowSensitive] = useState(false);
   const pathMode = isPathVariable(draft.name) || isPathVariable(input.originalName ?? "");
-
-  useEffect(() => {
-    if (!pathMode) return;
-    setCheckingPaths(true);
-    const timeout = window.setTimeout(() => {
-      void analyzePathEntries(pathEntries)
-        .then(setStatuses)
-        .finally(() => setCheckingPaths(false));
-    }, 250);
-    return () => window.clearTimeout(timeout);
-  }, [pathEntries, pathMode]);
+  const canMutate = canEditPath(draft.scope, isElevated, busy);
 
   const submit = () => {
     onSave({ ...draft, value: pathMode ? joinPathEntries(pathEntries) : draft.value });
@@ -632,56 +619,34 @@ function VariableEditor({ input, busy, onSave, onDelete, onClose }: { input: Env
         </header>
         <div className="modal-body">
           <div className="form-grid">
-            <label><span>Name</span><input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-            <label><span>Registry type</span><select value={draft.valueType} onChange={(event) => setDraft({ ...draft, valueType: event.target.value as EnvironmentVariableInput["valueType"] })}><option value="string">String (REG_SZ)</option><option value="expandableString">Expandable string (REG_EXPAND_SZ)</option></select></label>
+            <label><span>Name</span><input autoFocus disabled={!canMutate} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+            <label><span>Registry type</span><select disabled={!canMutate} value={draft.valueType} onChange={(event) => setDraft({ ...draft, valueType: event.target.value as EnvironmentVariableInput["valueType"] })}><option value="string">String (REG_SZ)</option><option value="expandableString">Expandable string (REG_EXPAND_SZ)</option></select></label>
           </div>
           {pathMode ? (
-            <PathEditor checking={checkingPaths} entries={pathEntries} onChange={setPathEntries} statuses={statuses} />
+            <PathEditor
+              busy={busy}
+              entries={pathEntries}
+              isElevated={isElevated}
+              onChange={setPathEntries}
+              onError={onError}
+              originalEntries={originalPathEntries}
+              scope={draft.scope}
+            />
           ) : (
             <label className="value-field">
               <span>Value</span>
               <div className="value-input-wrap">
-                <textarea className={isSensitiveVariable(draft.name) && !showSensitive ? "secret-masked" : ""} rows={7} value={draft.value} onChange={(event) => setDraft({ ...draft, value: event.target.value })} />
+                <textarea className={isSensitiveVariable(draft.name) && !showSensitive ? "secret-masked" : ""} disabled={!canMutate} rows={7} value={draft.value} onChange={(event) => setDraft({ ...draft, value: event.target.value })} />
                 {isSensitiveVariable(draft.name) && <button aria-label={showSensitive ? "Hide value" : "Show value"} className="icon-button small reveal-button" onClick={() => setShowSensitive((current) => !current)} type="button">{showSensitive ? <EyeOff size={15} /> : <Eye size={15} />}</button>}
               </div>
             </label>
           )}
         </div>
         <footer className="modal-footer">
-          <div>{input.originalName && <button className="danger-button" disabled={busy} onClick={onDelete} type="button"><Trash2 size={16} /> Delete</button>}</div>
-          <div className="button-row"><button className="secondary-button" onClick={onClose} type="button">Cancel</button><button className="primary-button" disabled={busy || !draft.name.trim()} onClick={submit} type="button">{busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save</button></div>
+          <div>{input.originalName && <button className="danger-button" disabled={!canMutate} onClick={onDelete} type="button"><Trash2 size={16} /> Delete</button>}</div>
+          <div className="button-row"><button className="secondary-button" onClick={onClose} type="button">Cancel</button><button className="primary-button" disabled={!canMutate || !draft.name.trim()} onClick={submit} type="button">{busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save</button></div>
         </footer>
       </section>
-    </div>
-  );
-}
-
-function PathEditor({ entries, statuses, checking, onChange }: { entries: string[]; statuses: PathEntryStatus[]; checking: boolean; onChange: (entries: string[]) => void }) {
-  const update = (index: number, value: string) => onChange(entries.map((entry, current) => current === index ? value : entry));
-  const move = (index: number, direction: -1 | 1) => {
-    const target = index + direction;
-    if (target < 0 || target >= entries.length) return;
-    const next = [...entries];
-    [next[index], next[target]] = [next[target], next[index]];
-    onChange(next);
-  };
-  return (
-    <div className="path-editor">
-      <div className="path-toolbar"><div><h3>PATH entries</h3><span>{entries.length} ordered entries</span></div><button className="secondary-button" onClick={() => onChange([...entries, ""])} type="button"><Plus size={15} /> Add entry</button></div>
-      <div className="path-list">
-        {entries.map((entry, index) => {
-          const status = statuses[index];
-          return (
-            <div className={status?.duplicate ? "path-row duplicate" : "path-row"} key={index}>
-              <span className="path-index">{index + 1}</span>
-              <div className="path-input"><input aria-label={`PATH entry ${index + 1}`} value={entry} onChange={(event) => update(index, event.target.value)} />{status && <small title={status.expandedValue}>{status.duplicate ? "Duplicate entry" : status.exists ? "Path exists" : "Path not found"}</small>}</div>
-              <span className={status?.duplicate || (status && !status.exists) ? "path-status warning" : "path-status valid"}>{checking && !status ? <LoaderCircle className="spin" size={15} /> : status?.exists && !status.duplicate ? <FolderCheck size={16} /> : <FolderX size={16} />}</span>
-              <div className="path-actions"><button aria-label="Move up" className="icon-button small" disabled={index === 0} onClick={() => move(index, -1)} type="button"><ArrowUp size={14} /></button><button aria-label="Move down" className="icon-button small" disabled={index === entries.length - 1} onClick={() => move(index, 1)} type="button"><ArrowDown size={14} /></button><button aria-label="Remove entry" className="icon-button small danger-icon" onClick={() => onChange(entries.filter((_, current) => current !== index))} type="button"><Trash2 size={14} /></button></div>
-            </div>
-          );
-        })}
-        {entries.length === 0 && <div className="table-empty">No PATH entries</div>}
-      </div>
     </div>
   );
 }

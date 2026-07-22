@@ -111,10 +111,25 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
 .path-toolbar { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .path-toolbar h3 { margin: 0; font-size: 14px; }
 .path-toolbar span { display: block; margin-top: 3px; color: #74808a; font-size: 11px; }
+.path-toolbar-actions { display: flex; align-items: center; gap: 8px; }
+.path-bulk-input { padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; border: 1px solid #d7dde2; border-radius: 6px; background: #f8fafb; }
+.path-bulk-input textarea { min-height: 68px; max-height: 150px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.path-feedback { min-height: 31px; padding: 8px 2px 0; color: #53616b; font-size: 12px; }
+.path-list-controls { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.path-filters { display: inline-flex; min-width: 0; overflow: hidden; border: 1px solid #cbd4da; border-radius: 6px; background: #fff; }
+.path-filters button { min-height: 32px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-left: 1px solid #d7dde2; color: #55626c; background: #fff; font-size: 12px; }
+.path-filters button:first-child { border-left: 0; }
+.path-filters button:hover { background: #f4f7f6; }
+.path-filters button.active { color: #145f43; background: #e7f3ed; font-weight: 700; }
+.path-filters button span { min-width: 18px; padding: 1px 4px; border-radius: 4px; color: #62707a; background: rgba(88, 103, 113, 0.1); font-size: 10px; text-align: center; }
 .path-list { overflow: hidden; border: 1px solid #d7dde2; border-radius: 6px; }
-.path-row { min-height: 56px; padding: 7px 8px; display: grid; grid-template-columns: 28px minmax(0, 1fr) 24px 98px; align-items: center; gap: 8px; border-top: 1px solid #e2e7ea; }
+.path-row { min-height: 56px; padding: 7px 8px; display: grid; grid-template-columns: 20px 28px minmax(0, 1fr) 24px 98px; align-items: center; gap: 8px; border-top: 1px solid #e2e7ea; }
 .path-row:first-child { border-top: 0; }
 .path-row.duplicate { background: #fff8f2; }
+.path-row.missing:not(.duplicate) { background: #fffdf7; }
+.path-row.dragging { opacity: 0.55; }
+.path-drag-handle { height: 30px; display: grid; place-items: center; color: #8a959d; cursor: grab; }
+.path-drag-handle:active { cursor: grabbing; }
 .path-index { color: #7a858e; font-size: 11px; text-align: center; }
 .path-input { min-width: 0; display: grid; gap: 3px; }
 .path-input small { overflow: hidden; color: #78838c; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
@@ -122,6 +137,16 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
 .path-status.valid { color: #23805c; }
 .path-status.warning { color: #b46b22; }
 .path-actions { display: flex; gap: 4px; }
+.path-change-summary { margin-top: 16px; padding: 12px; border: 1px solid #d7dde2; border-radius: 6px; background: #f8fafb; }
+.path-change-summary h3 { margin: 0 0 8px; font-size: 13px; }
+.path-change-summary p { margin: 0; color: #66737d; font-size: 12px; }
+.path-change-summary p strong, .path-change-summary p span { display: block; }
+.path-change-summary p span { margin-top: 3px; font-weight: 400; }
+.path-change-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.path-change-group { min-width: 0; color: #53616b; font-size: 11px; }
+.path-change-group > strong { font-size: 12px; }
+.path-change-group ul { max-height: 92px; margin: 6px 0 0; padding-left: 18px; overflow-y: auto; }
+.path-change-group li { margin-top: 3px; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -164,8 +189,17 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
   .modal-backdrop { padding: 0; align-items: end; }
   .editor-modal, .editor-modal.path-modal { width: 100%; max-height: 94vh; border-radius: 7px 7px 0 0; }
   .form-grid { grid-template-columns: 1fr; }
-  .path-row { grid-template-columns: 24px minmax(0, 1fr) 22px; }
-  .path-actions { grid-column: 2 / -1; justify-content: flex-end; }
+  .path-toolbar { padding: 12px 0; align-items: stretch; flex-direction: column; }
+  .path-toolbar-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .path-bulk-input { grid-template-columns: 1fr; }
+  .path-bulk-input button { width: 100%; }
+  .path-list-controls { padding: 10px 0; align-items: stretch; flex-direction: column; }
+  .path-filters { width: 100%; }
+  .path-filters button { flex: 1; justify-content: center; }
+  .path-list-controls > button { width: 100%; }
+  .path-row { grid-template-columns: 20px 24px minmax(0, 1fr) 22px; }
+  .path-actions { grid-column: 3 / -1; justify-content: flex-end; }
+  .path-change-groups { grid-template-columns: 1fr; }
   .modal-footer { align-items: stretch; flex-direction: column-reverse; }
   .modal-footer > div, .modal-footer button { width: 100%; }
 }

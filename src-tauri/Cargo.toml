@@ -1,6 +1,6 @@
 [package]
 name = "env-manager"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Windows user and system environment variable manager"
 edition = "2024"
 default-run = "env-manager"

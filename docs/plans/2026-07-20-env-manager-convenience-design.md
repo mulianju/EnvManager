@@ -53,3 +53,11 @@ Tauri creates a hidden compact `quick` window and a tray icon. Clicking the tray
 - Existing live HKCU integration test remains opt-in and is run before release.
 - Desktop and quick-panel workflows are exercised at desktop and narrow dimensions.
 - MSI and NSIS are rebuilt; MSI contents and release startup are inspected.
+
+## Release and validation boundaries
+
+- `pnpm dev` is a browser-only preview backed by in-memory sample data. It does not read or write the Windows Registry and cannot validate native dialogs, clipboard permissions, tray behavior, the quick window, UAC, or PowerShell launch.
+- The desktop application is the validation target for User, System, Effective, PATH, import/export, favorites, Undo, external revision handling, tray, and QuickPanel workflows.
+- Automated tests and the opt-in live HKCU test cover normal user-scope behavior. HKLM mutation and **Restart as administrator** remain manual checks because Windows must own the UAC consent boundary.
+- Favorites are stored at `%APPDATA%\EnvManager\settings.json`; only `{scope,name}` identities are persisted. Mutation backups remain under `%APPDATA%\EnvManager\backups`.
+- Version `0.2.0` is the first release containing the complete convenience workflow set described in this document.

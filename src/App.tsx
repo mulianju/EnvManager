@@ -104,6 +104,8 @@ function App() {
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const requestId = useRef(0);
   const favoriteGeneration = useRef(0);
+  const importButtonRef = useRef<HTMLButtonElement | null>(null);
+  const exportButtonRef = useRef<HTMLButtonElement | null>(null);
   const snapshotRef = useRef<EnvironmentSnapshot | null>(null);
   const interactionOpenRef = useRef(false);
   const busyRef = useRef(false);
@@ -146,6 +148,15 @@ function App() {
   }, [refresh]);
 
   const interactionOpen = Boolean(editor || activeMenuKey || transferMode);
+
+  const closeTransferDialog = () => {
+    const trigger = transferMode === "import"
+      ? importButtonRef.current
+      : exportButtonRef.current;
+    setTransferMode(null);
+    window.requestAnimationFrame(() => trigger?.focus());
+  };
+
   useEffect(() => {
     interactionOpenRef.current = interactionOpen;
   }, [interactionOpen]);
@@ -485,6 +496,7 @@ function App() {
                   setActiveMenuKey(null);
                   setTransferMode("import");
                 }}
+                ref={importButtonRef}
                 type="button"
               >
                 <FileUp size={15} /> Import
@@ -496,6 +508,7 @@ function App() {
                   setActiveMenuKey(null);
                   setTransferMode("export");
                 }}
+                ref={exportButtonRef}
                 type="button"
               >
                 <FileDown size={15} /> Export
@@ -607,7 +620,7 @@ function App() {
         <TransferDialog
           isElevated={snapshot.isElevated}
           mode={transferMode}
-          onClose={() => setTransferMode(null)}
+          onClose={closeTransferDialog}
           onImported={acceptMutation}
           onNotice={(message) => {
             setError(null);

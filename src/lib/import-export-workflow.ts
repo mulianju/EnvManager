@@ -70,6 +70,17 @@ export function importConfirmationMessage(
   return `Apply this import: create ${summary.create}, ${updateImpact}, ${summary.unchanged} unchanged?`;
 }
 
+export function previewWritesSystem(
+  preview: ImportPreview | null,
+  strategy: ImportConflictStrategy | null,
+): boolean {
+  if (!preview) return false;
+  return preview.items.some(({ variable, action }) =>
+    variable.scope === "system" &&
+    (action === "create" || (action === "update" && strategy === "overwrite")),
+  );
+}
+
 export function createExportRequest(
   path: string,
   format: TransferFileFormat,

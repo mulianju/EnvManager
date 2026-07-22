@@ -10,6 +10,7 @@ import {
   defaultExportFileName,
   deriveTransferFileFormat,
   importConfirmationMessage,
+  previewWritesSystem,
   summarizeImportPreview,
 } from "./import-export-workflow";
 
@@ -115,6 +116,53 @@ describe("import and export workflow", () => {
       expect(defaultExportFileName(format, scope)).toBe(expected);
     },
   );
+
+  it.each([
+    ["create", "overwrite", true],
+    ["create", "skipExisting", true],
+    ["create", null, true],
+    ["update", "overwrite", true],
+    ["update", "skipExisting", false],
+    ["update", null, false],
+    ["unchanged", "overwrite", false],
+    ["unchanged", "skipExisting", false],
+    ["unchanged", null, false],
+  ] as const)(
+    "reports whether a System %s writes with %s",
+    (action, strategy, expected) => {
+      const item = previewItem(
+        variable("SYSTEM_VALUE", "new", "system"),
+        action === "create" ? null : variable("SYSTEM_VALUE", "old", "system"),
+        action,
+      );
+
+      expect(previewWritesSystem(previewWithItems(item), strategy)).toBe(expected);
+    },
+  );
+
+  it("only blocks mixed previews when the selected strategy writes System updates", () => {
+    const preview = previewWithItems(
+      previewItem(variable("USER_NEW", "new"), null, "create"),
+      previewItem(
+        variable("SYSTEM_UPDATE", "new", "system"),
+        variable("SYSTEM_UPDATE", "old", "system"),
+        "update",
+      ),
+    );
+
+    expect(previewWritesSystem(preview, "skipExisting")).toBe(false);
+    expect(previewWritesSystem(preview, "overwrite")).toBe(true);
+    expect(previewWritesSystem(preview, null)).toBe(false);
+  });
+
+  it("does not report writes before a preview or for User-only changes", () => {
+    const preview = previewWithItems(
+      previewItem(variable("USER_NEW", "new"), null, "create"),
+    );
+
+    expect(previewWritesSystem(null, "overwrite")).toBe(false);
+    expect(previewWritesSystem(preview, "overwrite")).toBe(false);
+  });
 });
 
 function importPreview(): ImportPreview {
@@ -134,6 +182,16 @@ function importPreview(): ImportPreview {
         "unchanged",
       ),
     ],
+  };
+}
+
+function previewWithItems(
+  ...items: ImportPreview["items"]
+): ImportPreview {
+  return {
+    token: "preview-token",
+    environmentRevision: "preview-revision",
+    items,
   };
 }
 

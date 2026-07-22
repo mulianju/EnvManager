@@ -31,6 +31,7 @@ import {
   defaultExportFileName,
   deriveTransferFileFormat,
   importConfirmationMessage,
+  previewWritesSystem,
   summarizeImportPreview,
 } from "../lib/import-export-workflow";
 import type {
@@ -169,9 +170,7 @@ function ImportWorkflow({
     () => preview ? summarizeImportPreview(preview) : null,
     [preview],
   );
-  const includesSystem = preview?.items.some(
-    ({ variable }) => variable.scope === "system",
-  ) ?? false;
+  const requiresElevation = !isElevated && previewWritesSystem(preview, strategy);
   const requestReady = Boolean(
     path && format && (format !== "dotEnv" || defaultScope),
   );
@@ -179,7 +178,7 @@ function ImportWorkflow({
     preview &&
     preview.items.length > 0 &&
     (!summary?.update || strategy) &&
-    (!includesSystem || isElevated),
+    !requiresElevation,
   );
 
   const chooseFile = async () => {
@@ -421,10 +420,10 @@ function ImportWorkflow({
               </fieldset>
             )}
 
-            {includesSystem && !isElevated && (
+            {requiresElevation && (
               <div className="transfer-permission" role="alert">
                 <ShieldCheck size={19} />
-                <div><strong>Administrator permission required</strong><span>This preview includes System variables. Restart as administrator before applying it.</span></div>
+                <div><strong>Administrator permission required</strong><span>The selected strategy writes System variables. Restart as administrator before applying it.</span></div>
                 <button className="secondary-button" disabled={busy} onClick={() => void restartElevatedForImport()} type="button"><ShieldCheck size={15} /> Restart</button>
               </div>
             )}

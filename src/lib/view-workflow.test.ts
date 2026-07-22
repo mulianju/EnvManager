@@ -91,11 +91,12 @@ describe("variable view workflow", () => {
 
   it("retries transfers with overwrite only for a collision error", () => {
     const input = transfer("system", "copy", false);
-    expect(retryTransferAfterCollision(input, "variableAlreadyExists")).toEqual({
-      ...input,
-      overwrite: true,
+    const attempt = { input, expectedRevision: "opened-revision" };
+    expect(retryTransferAfterCollision(attempt, "variableAlreadyExists")).toEqual({
+      input: { ...input, overwrite: true },
+      expectedRevision: "opened-revision",
     });
-    expect(retryTransferAfterCollision(input, "registryOperationFailed")).toBeNull();
+    expect(retryTransferAfterCollision(attempt, "registryOperationFailed")).toBeNull();
   });
 });
 

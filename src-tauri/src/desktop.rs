@@ -38,6 +38,7 @@ pub fn configure(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
             }
             NEW_POWERSHELL_ID => {
                 if let Err(error) = app.state::<AppState>().launch_powershell() {
+                    let _ = show_main_window(app);
                     let _ = app.emit("desktop-error", error);
                 }
             }
@@ -81,4 +82,20 @@ fn show_main_window(app: &AppHandle) -> tauri::Result<()> {
         window.set_focus()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn powershell_failure_shows_main_before_emitting_the_error() {
+        let source = include_str!("desktop.rs");
+        let branch_start = source.find("NEW_POWERSHELL_ID =>").unwrap();
+        let branch_end = source[branch_start..].find("QUIT_ID =>").unwrap() + branch_start;
+        let branch = &source[branch_start..branch_end];
+
+        assert!(
+            branch.find("show_main_window(app)").unwrap()
+                < branch.find("app.emit(\"desktop-error\"").unwrap()
+        );
+    }
 }

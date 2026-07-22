@@ -426,11 +426,14 @@ export function shouldApplyGeneration(
 }
 
 export function retryTransferAfterCollision(
-  input: TransferVariableInput,
+  attempt: { input: TransferVariableInput; expectedRevision: string },
   errorCode: string | null,
-): TransferVariableInput | null {
-  if (input.overwrite || errorCode !== "variableAlreadyExists") return null;
-  return { ...input, overwrite: true };
+): { input: TransferVariableInput; expectedRevision: string } | null {
+  if (attempt.input.overwrite || errorCode !== "variableAlreadyExists") return null;
+  return {
+    ...attempt,
+    input: { ...attempt.input, overwrite: true },
+  };
 }
 
 export function previewVariableNamesEqual(left: string, right: string): boolean {

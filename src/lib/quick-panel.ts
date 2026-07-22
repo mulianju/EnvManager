@@ -2,7 +2,6 @@ import type {
   EffectiveEnvironmentVariable,
   FavoriteKey,
 } from "../types";
-import { isSensitiveVariable } from "./environment";
 
 export interface QuickPanelRow extends EffectiveEnvironmentVariable {
   id: string;
@@ -43,7 +42,7 @@ export function buildQuickRows(
         ...variable,
         id: `${variable.source}:${variable.name}`,
         isFavorite,
-        isSensitive: isSensitiveVariable(variable.name),
+        isSensitive: true,
         favoriteKey,
       };
     });

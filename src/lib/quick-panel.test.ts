@@ -100,6 +100,18 @@ describe("quick panel row model", () => {
     expect(quickDisplayValue(row, true)).toBe("raw-secret");
     expect(quickCopyValue(row)).toBe("raw-secret");
   });
+
+  it("masks ordinary values by default and reveals them only on request", () => {
+    const [row] = buildQuickRows(effectiveVariables, [], "java");
+
+    expect(row).toMatchObject({
+      name: "JAVA_HOME",
+      value: "C:\\Java",
+      isSensitive: true,
+    });
+    expect(quickDisplayValue(row, false)).toBe("********");
+    expect(quickDisplayValue(row, true)).toBe("C:\\Java");
+  });
 });
 
 describe("quick panel keyboard selection", () => {

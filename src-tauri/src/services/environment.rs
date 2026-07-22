@@ -172,7 +172,24 @@ impl EnvironmentService {
     }
 
     pub fn launch_powershell(&self) -> Result<(), EnvironmentServiceError> {
-        crate::platform::launch_powershell()?;
+        self.launch_powershell_with(
+            std::env::vars().collect(),
+            crate::platform::launch_powershell,
+        )
+    }
+
+    fn launch_powershell_with<F>(
+        &self,
+        base: Vec<(String, String)>,
+        launcher: F,
+    ) -> Result<(), EnvironmentServiceError>
+    where
+        F: FnOnce(&[(String, String)]) -> Result<(), EnvironmentStoreError>,
+    {
+        let user = self.store.list(EnvironmentScope::User)?;
+        let system = self.store.list(EnvironmentScope::System)?;
+        let environment = compose_process_environment(&base, &user, &system);
+        launcher(&environment)?;
         Ok(())
     }
 
@@ -376,6 +393,15 @@ impl EnvironmentService {
         self.finalize_transaction(vec![rollback.id], &[(backup.scope, current)])
     }
 
+    pub fn restore_backup_checked(
+        &self,
+        backup_id: &str,
+        expected_revision: &str,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        self.require_revision(expected_revision)?;
+        self.restore_backup(backup_id)
+    }
+
     pub fn undo_mutation(
         &self,
         backup_ids: &[String],
@@ -507,6 +533,15 @@ impl EnvironmentService {
             rollback_states.push((input.source_scope, source_variables));
         }
         self.finalize_transaction(undo_backup_ids, &rollback_states)
+    }
+
+    pub fn transfer_variable_checked(
+        &self,
+        input: TransferVariableInput,
+        expected_revision: &str,
+    ) -> Result<MutationResult, EnvironmentServiceError> {
+        self.require_revision(expected_revision)?;
+        self.transfer_variable(input)
     }
 
     pub fn analyze_path_entries(
@@ -1655,6 +1690,48 @@ mod tests {
     }
 
     #[test]
+    fn powershell_launch_uses_the_composed_registry_environment() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::System,
+            vec![variable(
+                EnvironmentScope::System,
+                "TOOL_HOME",
+                r"C:\System",
+            )],
+        );
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "Tool_Home", r"C:\User")],
+        );
+        let launched = Arc::new(Mutex::new(Vec::new()));
+        let captured = launched.clone();
+
+        harness
+            .service
+            .launch_powershell_with(
+                vec![("STALE".to_owned(), "base".to_owned())],
+                move |entries| {
+                    *captured.lock().unwrap() = entries.to_vec();
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let entries = launched.lock().unwrap();
+        assert!(entries.iter().any(|(name, value)| {
+            variable_names_equal(name, "TOOL_HOME") && value == r"C:\User"
+        }));
+        assert!(
+            entries
+                .iter()
+                .any(|(name, value)| name == "STALE" && value == "base")
+        );
+    }
+
+    #[test]
     fn set_returns_its_pre_mutation_backup_and_updated_snapshot() {
         let harness = service(false);
 
@@ -1803,6 +1880,39 @@ mod tests {
         assert_eq!(rollback.scope, EnvironmentScope::User);
         assert_eq!(rollback.reason, "beforeRestore");
         assert_eq!(rollback.variables[0].value, "second");
+    }
+
+    #[test]
+    fn stale_restore_is_rejected_before_backup_or_write_side_effects() {
+        let harness = service(false);
+        let created = harness
+            .service
+            .set_variable(input(EnvironmentScope::User, "JAVA_HOME", r"C:\Java"))
+            .unwrap();
+        let selected_backup_id = created.undo_backup_ids[0].clone();
+        let backups_before = harness.service.backups.list().unwrap().len();
+        let state_before = harness.state.lock().unwrap();
+        let set_calls_before = state_before.set_calls;
+        let delete_calls_before = state_before.delete_calls;
+        let broadcasts_before = state_before.broadcasts;
+        drop(state_before);
+
+        let result = harness
+            .service
+            .restore_backup_checked(&selected_backup_id, "stale-revision");
+
+        assert!(matches!(
+            result,
+            Err(EnvironmentServiceError::EnvironmentChanged)
+        ));
+        assert_eq!(
+            harness.service.backups.list().unwrap().len(),
+            backups_before
+        );
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, set_calls_before);
+        assert_eq!(state.delete_calls, delete_calls_before);
+        assert_eq!(state.broadcasts, broadcasts_before);
     }
 
     #[test]
@@ -2083,6 +2193,41 @@ mod tests {
         assert_eq!(state.delete_calls, 0);
         assert_eq!(state.broadcasts, 0);
         assert!(!harness.directory.exists());
+    }
+
+    #[test]
+    fn stale_transfer_is_rejected_before_permission_backup_or_write_side_effects() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "JAVA_HOME", r"C:\Java")],
+        );
+        let backups_before = harness.service.backups.list().unwrap().len();
+
+        let result = harness.service.transfer_variable_checked(
+            transfer(
+                EnvironmentScope::User,
+                EnvironmentScope::System,
+                "JAVA_HOME",
+                TransferMode::Copy,
+                false,
+            ),
+            "stale-revision",
+        );
+
+        assert!(matches!(
+            result,
+            Err(EnvironmentServiceError::EnvironmentChanged)
+        ));
+        assert_eq!(
+            harness.service.backups.list().unwrap().len(),
+            backups_before
+        );
+        let state = harness.state.lock().unwrap();
+        assert_eq!(state.set_calls, 0);
+        assert_eq!(state.delete_calls, 0);
+        assert_eq!(state.broadcasts, 0);
     }
 
     #[test]

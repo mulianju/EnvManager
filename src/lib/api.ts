@@ -136,8 +136,12 @@ export async function deleteEnvironmentVariable(
   });
 }
 
-export async function restoreEnvironmentBackup(backupId: string): Promise<MutationResult> {
+export async function restoreEnvironmentBackup(
+  backupId: string,
+  expectedRevision: string,
+): Promise<MutationResult> {
   if (browserPreview) {
+    assertPreviewRevision(expectedRevision);
     const backup = previewSnapshot.backups.find((item) => item.id === backupId);
     if (!backup) throw previewError("backupOperationFailed", "Backup was not found.");
     assertPreviewPermission(backup.scope);
@@ -147,7 +151,10 @@ export async function restoreEnvironmentBackup(backupId: string): Promise<Mutati
     setScopeVariables(backup.scope, structuredClone(variables));
     return previewMutationResult([rollbackId]);
   }
-  return invoke<MutationResult>("restore_environment_backup", { backupId });
+  return invoke<MutationResult>("restore_environment_backup", {
+    backupId,
+    expectedRevision,
+  });
 }
 
 export async function undoEnvironmentMutation(
@@ -189,8 +196,10 @@ export async function undoEnvironmentMutation(
 
 export async function transferEnvironmentVariable(
   input: TransferVariableInput,
+  expectedRevision: string,
 ): Promise<MutationResult> {
   if (browserPreview) {
+    assertPreviewRevision(expectedRevision);
     if (input.sourceScope === input.targetScope) {
       throw previewError("invalidTransfer", "Source and target scopes must be different.");
     }
@@ -223,7 +232,10 @@ export async function transferEnvironmentVariable(
     }
     return previewMutationResult(backupIds);
   }
-  return invoke<MutationResult>("transfer_environment_variable", { input });
+  return invoke<MutationResult>("transfer_environment_variable", {
+    input,
+    expectedRevision,
+  });
 }
 
 export async function getEnvironmentRevision(): Promise<string> {
@@ -380,6 +392,10 @@ export async function restartElevated(): Promise<void> {
 export function apiErrorMessage(error: unknown): string {
   if (isApiError(error)) return error.message;
   return error instanceof Error ? error.message : String(error);
+}
+
+export function desktopErrorMessage(payload: ApiError): string {
+  return apiErrorMessage(payload);
 }
 
 export function apiErrorCode(error: unknown): string | null {

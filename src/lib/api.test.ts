@@ -66,26 +66,28 @@ describe("browser preview API contracts", () => {
 
   it("copies and moves variables between scopes", async () => {
     const api = await loadPreviewApi();
+    const beforeCopy = await api.getEnvironmentSnapshot();
     const copied = await api.transferEnvironmentVariable({
       sourceScope: "system",
       targetScope: "user",
       name: "ComSpec",
       mode: "copy",
       overwrite: false,
-    });
+    }, beforeCopy.revision);
 
     expectMutationResult(copied);
     expect(findValue(copied.snapshot, "system", "ComSpec")).toBeTruthy();
     expect(findValue(copied.snapshot, "user", "ComSpec")).toBeTruthy();
 
     await api.restartElevated();
+    const beforeMove = await api.getEnvironmentSnapshot();
     const moved = await api.transferEnvironmentVariable({
       sourceScope: "user",
       targetScope: "system",
       name: "JAVA_HOME",
       mode: "move",
       overwrite: false,
-    });
+    }, beforeMove.revision);
 
     expectMutationResult(moved);
     expect(findValue(moved.snapshot, "user", "JAVA_HOME")).toBeUndefined();
@@ -159,7 +161,8 @@ describe("browser preview API contracts", () => {
     };
     const favorite: FavoriteKeyContract = { scope: "user", name: "JAVA_HOME" };
 
-    await api.transferEnvironmentVariable(input);
+    await api.transferEnvironmentVariable(input, "transfer-revision");
+    await api.restoreEnvironmentBackup("backup-id", "restore-revision");
     await api.toggleFavorite(favorite);
     await api.undoEnvironmentMutation(
       ["user-backup", "system-backup"],
@@ -168,9 +171,14 @@ describe("browser preview API contracts", () => {
 
     expect(invoke).toHaveBeenNthCalledWith(1, "transfer_environment_variable", {
       input,
+      expectedRevision: "transfer-revision",
     });
-    expect(invoke).toHaveBeenNthCalledWith(2, "toggle_favorite", { favorite });
-    expect(invoke).toHaveBeenNthCalledWith(3, "undo_environment_mutation", {
+    expect(invoke).toHaveBeenNthCalledWith(2, "restore_environment_backup", {
+      backupId: "backup-id",
+      expectedRevision: "restore-revision",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "toggle_favorite", { favorite });
+    expect(invoke).toHaveBeenNthCalledWith(4, "undo_environment_mutation", {
       backupIds: ["user-backup", "system-backup"],
       expectedRevision: "expected-revision",
     });
@@ -286,7 +294,7 @@ describe("browser preview API contracts", () => {
     });
   });
 
-  it("rejects stale save delete and undo receipts in browser preview", async () => {
+  it("rejects stale mutation receipts in browser preview", async () => {
     const api = await loadPreviewApi();
     const snapshot = await api.getEnvironmentSnapshot();
     const input: EnvironmentVariableInput = {
@@ -306,7 +314,28 @@ describe("browser preview API contracts", () => {
     await expect(
       api.undoEnvironmentMutation(["missing"], "stale"),
     ).rejects.toMatchObject({ code: "environmentChanged" });
+    await expect(
+      api.transferEnvironmentVariable({
+        sourceScope: "user",
+        targetScope: "system",
+        name: "JAVA_HOME",
+        mode: "copy",
+        overwrite: false,
+      }, "stale"),
+    ).rejects.toMatchObject({ code: "environmentChanged" });
+    await expect(
+      api.restoreEnvironmentBackup("missing-backup", "stale"),
+    ).rejects.toMatchObject({ code: "environmentChanged" });
     expect(await api.getEnvironmentSnapshot()).toEqual(snapshot);
+  });
+
+  it("formats desktop event ApiError payloads through the existing error contract", async () => {
+    const api = await import("./api");
+
+    expect(api.desktopErrorMessage({
+      code: "registryOperationFailed",
+      message: "Unable to launch Windows PowerShell.",
+    })).toBe("Unable to launch Windows PowerShell.");
   });
 });
 
@@ -320,6 +349,11 @@ async function loadPreviewApi() {
     ): Promise<MutationResultContract>;
     transferEnvironmentVariable(
       input: TransferVariableInputContract,
+      expectedRevision: string,
+    ): Promise<MutationResultContract>;
+    restoreEnvironmentBackup(
+      backupId: string,
+      expectedRevision: string,
     ): Promise<MutationResultContract>;
     getFavorites(): Promise<FavoriteKeyContract[]>;
     toggleFavorite(favorite: FavoriteKeyContract): Promise<FavoriteKeyContract[]>;

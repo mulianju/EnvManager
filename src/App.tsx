@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
   Check,
@@ -32,6 +33,7 @@ import {
   apiErrorMessage,
   copyText,
   deleteEnvironmentVariable,
+  desktopErrorMessage,
   getEnvironmentRevision,
   getEnvironmentSnapshot,
   getFavorites,
@@ -60,6 +62,7 @@ import {
   transferConfirmationMessage,
 } from "./lib/environment";
 import type {
+  ApiError,
   BackupSummary,
   EnvironmentScope,
   EnvironmentSnapshot,
@@ -146,6 +149,24 @@ function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
+    void listen<ApiError>("desktop-error", (event) => {
+      if (mounted) setError(desktopErrorMessage(event.payload));
+    }).then((removeListener) => {
+      if (mounted) unlisten = removeListener;
+      else removeListener();
+    }).catch((listenError) => {
+      if (mounted) setError(apiErrorMessage(listenError));
+    });
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, []);
 
   const interactionOpen = Boolean(editor || activeMenuKey || transferMode);
 
@@ -375,6 +396,7 @@ function App() {
       return;
     }
     const targetScope: EnvironmentScope = variable.scope === "user" ? "system" : "user";
+    const expectedRevision = snapshot.revision;
     const input = {
       sourceScope: variable.scope,
       targetScope,
@@ -392,13 +414,16 @@ function App() {
     let next: MutationResult | null = null;
     try {
       try {
-        next = await transferEnvironmentVariable(input);
+        next = await transferEnvironmentVariable(input, expectedRevision);
       } catch (transferError) {
-        const retry = retryTransferAfterCollision(input, apiErrorCode(transferError));
+        const retry = retryTransferAfterCollision(
+          { input, expectedRevision },
+          apiErrorCode(transferError),
+        );
         if (!retry) throw transferError;
-        const overwriteConfirmation = transferConfirmationMessage(retry);
+        const overwriteConfirmation = transferConfirmationMessage(retry.input);
         if (!overwriteConfirmation || !window.confirm(overwriteConfirmation)) return;
-        next = await transferEnvironmentVariable(retry);
+        next = await transferEnvironmentVariable(retry.input, retry.expectedRevision);
       }
     } catch (transferError) {
       setError(apiErrorMessage(transferError));
@@ -591,7 +616,9 @@ function App() {
                     return;
                   }
                   if (!window.confirm(`Restore this ${backup.scope} backup? Current values in that scope will be replaced.`)) return;
-                  const next = await perform(() => restoreEnvironmentBackup(backup.id));
+                  const next = await perform(() =>
+                    restoreEnvironmentBackup(backup.id, snapshot.revision)
+                  );
                   if (next) {
                     acceptMutation(next, "Backup restored. A rollback backup was created.");
                   }

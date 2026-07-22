@@ -119,10 +119,11 @@ pub fn delete_environment_variable(
 #[tauri::command]
 pub fn restore_environment_backup(
     backup_id: String,
+    expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
-        .restore_backup(&backup_id)
+        .restore_backup_checked(&backup_id, &expected_revision)
         .map_err(ApiError::from)
 }
 
@@ -140,10 +141,11 @@ pub fn undo_environment_mutation(
 #[tauri::command]
 pub fn transfer_environment_variable(
     input: TransferVariableInput,
+    expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<MutationResult, ApiError> {
     lock_service(&state)?
-        .transfer_variable(input)
+        .transfer_variable_checked(input, &expected_revision)
         .map_err(ApiError::from)
 }
 

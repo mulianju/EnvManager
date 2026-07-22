@@ -42,12 +42,14 @@ import {
 import {
   canEditPath,
   canTransferVariable,
+  createPathEntryDrafts,
+  createPathEntryIdFactory,
   filterEffectiveVariables,
   filterVariables,
   formatVariableForCopy,
+  finalizePathEdit,
   isPathVariable,
   isSensitiveVariable,
-  joinPathEntries,
   parsePathEntries,
   revisionRefreshDecision,
   retryTransferAfterCollision,
@@ -600,14 +602,22 @@ function BackupsView({ snapshot, busy, onRestore }: { snapshot: EnvironmentSnaps
 
 function VariableEditor({ input, busy, isElevated, onSave, onDelete, onClose, onError }: { input: EnvironmentVariableInput; busy: boolean; isElevated: boolean; onSave: (input: EnvironmentVariableInput) => void; onDelete: () => void; onClose: () => void; onError: (message: string) => void }) {
   const [draft, setDraft] = useState(input);
-  const [originalPathEntries] = useState(() => parsePathEntries(input.value));
-  const [pathEntries, setPathEntries] = useState(originalPathEntries);
+  const [createPathEntryId] = useState(() => createPathEntryIdFactory());
+  const [pathDrafts, setPathDrafts] = useState(() =>
+    createPathEntryDrafts(
+      parsePathEntries(input.value),
+      createPathEntryId,
+    )
+  );
   const [showSensitive, setShowSensitive] = useState(false);
   const pathMode = isPathVariable(draft.name) || isPathVariable(input.originalName ?? "");
   const canMutate = canEditPath(draft.scope, isElevated, busy);
 
   const submit = () => {
-    onSave({ ...draft, value: pathMode ? joinPathEntries(pathEntries) : draft.value });
+    const value = pathMode
+      ? finalizePathEdit(input.value, pathDrafts.map((entry) => entry.value)).value
+      : draft.value;
+    onSave({ ...draft, value });
   };
 
   return (
@@ -625,11 +635,12 @@ function VariableEditor({ input, busy, isElevated, onSave, onDelete, onClose, on
           {pathMode ? (
             <PathEditor
               busy={busy}
-              entries={pathEntries}
+              createId={createPathEntryId}
+              drafts={pathDrafts}
               isElevated={isElevated}
-              onChange={setPathEntries}
+              onChange={setPathDrafts}
               onError={onError}
-              originalEntries={originalPathEntries}
+              originalRaw={input.value}
               scope={draft.scope}
             />
           ) : (

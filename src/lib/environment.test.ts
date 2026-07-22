@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendPathEntryDraft,
+  createPathEntryDrafts,
+  createPathEntryIdFactory,
   deduplicatePathEntries,
   duplicatePathEntryIndexes,
   filterVariables,
+  finalizePathEdit,
   filterPathEntryStatuses,
   formatVariableForCopy,
   isSensitiveVariable,
+  insertPathEntryDrafts,
   joinPathEntries,
   mergeEffectiveVariables,
   parsePathBulkInput,
   parsePathEntries,
+  reorderPathEntries,
+  removeDuplicatePathEntryDrafts,
   summarizePathChanges,
+  updatePathEntryDrafts,
 } from "./environment";
 import type { EnvironmentVariable, PathEntryStatus } from "../types";
 
@@ -159,6 +167,78 @@ describe("environment helpers", () => {
         { value: "c:\\a", fromIndex: 1, toIndex: 2 },
       ],
       orderChanged: true,
+    });
+  });
+
+  it("keeps session draft IDs attached through repeated reorders and edits", () => {
+    const nextId = createPathEntryIdFactory("test");
+    let drafts = createPathEntryDrafts(["A", "A", "B"], nextId);
+
+    expect(drafts.map(({ id }) => id)).toEqual(["test-0", "test-1", "test-2"]);
+    expect(new Set(drafts.map(({ id }) => id)).size).toBe(3);
+
+    const movingId = drafts[0].id;
+    drafts = reorderPathEntries(drafts, 0, 2);
+    expect(drafts.map(({ id, value }) => [id, value])).toEqual([
+      ["test-1", "A"],
+      ["test-2", "B"],
+      [movingId, "A"],
+    ]);
+    drafts = reorderPathEntries(drafts, 2, 1);
+    drafts = updatePathEntryDrafts(drafts, movingId, "A edited");
+    expect(drafts[1]).toEqual({ id: movingId, value: "A edited" });
+  });
+
+  it("preserves existing draft IDs across add, bulk insert, and deduplication", () => {
+    const nextId = createPathEntryIdFactory("edit");
+    let drafts = createPathEntryDrafts(["C:\\A", "c:/a/"], nextId);
+    const firstId = drafts[0].id;
+    const duplicateId = drafts[1].id;
+
+    drafts = appendPathEntryDraft(drafts, "", nextId);
+    drafts = insertPathEntryDrafts(drafts, "D:\\B;C:\\A", nextId);
+    expect(drafts.slice(0, 2).map(({ id }) => id)).toEqual([firstId, duplicateId]);
+    expect(drafts[drafts.length - 1]).toEqual({ id: "edit-3", value: "D:\\B" });
+
+    drafts = removeDuplicatePathEntryDrafts(drafts);
+    expect(drafts.some(({ id }) => id === firstId)).toBe(true);
+    expect(drafts.some(({ id }) => id === duplicateId)).toBe(false);
+    expect(drafts[drafts.length - 1]).toEqual({ id: "edit-3", value: "D:\\B" });
+  });
+
+  it("preserves raw PATH text until a semantic change is finalized", () => {
+    const originalRaw = " A ;; B ; ";
+    const unchanged = {
+      added: [],
+      removed: [],
+      moved: [],
+      orderChanged: false,
+    };
+
+    expect(finalizePathEdit(originalRaw, ["A", "B"])).toEqual({
+      value: originalRaw,
+      summary: unchanged,
+    });
+    expect(finalizePathEdit(originalRaw, ["A", "B", "  "])).toEqual({
+      value: originalRaw,
+      summary: unchanged,
+    });
+  });
+
+  it("finalizes the exact value represented by add, remove, and move summary", () => {
+    expect(
+      finalizePathEdit(" A ;; B ; C ;", ["C", "D", "B", ""]),
+    ).toEqual({
+      value: "C;D;B",
+      summary: {
+        added: ["D"],
+        removed: ["A"],
+        moved: [
+          { value: "C", fromIndex: 2, toIndex: 0 },
+          { value: "B", fromIndex: 1, toIndex: 2 },
+        ],
+        orderChanged: true,
+      },
     });
   });
 

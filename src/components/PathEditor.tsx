@@ -7,15 +7,8 @@ import {
 } from "react";
 import {
   AlertCircle,
-  ArrowDown,
-  ArrowUp,
-  CircleHelp,
   ClipboardPaste,
-  FolderCheck,
   FolderOpen,
-  FolderX,
-  GripVertical,
-  LoaderCircle,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -25,39 +18,45 @@ import {
   pickEnvironmentFolder,
 } from "../lib/api";
 import {
+  appendPathEntryDraft,
   canEditPath,
-  insertPathEntries,
+  finalizePathEdit,
+  insertPathEntryDrafts,
   PATH_ENTRY_DRAG_MIME,
   parsePathBulkInput,
   parsePathDragIndex,
   pathFilterCounts,
-  removeDuplicatePathEntries,
+  removeDuplicatePathEntryDrafts,
   reorderPathEntries,
-  summarizePathChanges,
+  updatePathEntryDrafts,
 } from "../lib/environment";
 import type {
   EnvironmentScope,
+  PathEntryDraft,
   PathEntryStatus,
   PathStatusFilter,
 } from "../types";
+import { PathRow } from "./PathRow";
 
 interface PathEditorProps {
   busy: boolean;
-  entries: string[];
+  createId: () => string;
+  drafts: PathEntryDraft[];
   isElevated: boolean;
-  onChange: (entries: string[]) => void;
+  onChange: (drafts: PathEntryDraft[]) => void;
   onError: (message: string) => void;
-  originalEntries: string[];
+  originalRaw: string;
   scope: EnvironmentScope;
 }
 
 export function PathEditor({
   busy,
-  entries,
+  createId,
+  drafts,
   isElevated,
   onChange,
   onError,
-  originalEntries,
+  originalRaw,
   scope,
 }: PathEditorProps) {
   const [statuses, setStatuses] = useState<PathEntryStatus[]>([]);
@@ -71,6 +70,7 @@ export function PathEditor({
   const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
   const analysisGeneration = useRef(0);
   const disabled = !canEditPath(scope, isElevated, busy) || pickingFolder;
+  const entries = useMemo(() => drafts.map(({ value }) => value), [drafts]);
   const currentStatuses =
     statuses.length === entries.length &&
     statuses.every((status, index) => status.value === entries[index])
@@ -79,15 +79,15 @@ export function PathEditor({
   const analyzedCounts = pathFilterCounts(currentStatuses);
   const counts = { ...analyzedCounts, all: entries.length };
   const changes = useMemo(
-    () => summarizePathChanges(originalEntries, entries),
-    [entries, originalEntries],
+    () => finalizePathEdit(originalRaw, entries).summary,
+    [entries, originalRaw],
   );
   const hasChanges =
     changes.added.length > 0 ||
     changes.removed.length > 0 ||
-    changes.orderChanged;
-  const visibleEntries = entries
-    .map((entry, index) => ({ entry, index, status: currentStatuses[index] }))
+    changes.moved.length > 0;
+  const visibleEntries = drafts
+    .map((draft, index) => ({ draft, index, status: currentStatuses[index] }))
     .filter(({ status }) =>
       filter === "all" ||
       (filter === "duplicate" && status?.duplicate) ||
@@ -127,11 +127,11 @@ export function PathEditor({
     };
   }, [entries, onError]);
 
-  const update = (index: number, value: string) => {
-    onChange(entries.map((entry, current) => current === index ? value : entry));
+  const update = (id: string, value: string) => {
+    onChange(updatePathEntryDrafts(drafts, id, value));
   };
   const move = (index: number, direction: -1 | 1) => {
-    onChange(reorderPathEntries(entries, index, index + direction));
+    onChange(reorderPathEntries(drafts, index, index + direction));
   };
   const insertBulkEntries = () => {
     const parsedEntries = parsePathBulkInput(bulkInput);
@@ -139,14 +139,14 @@ export function PathEditor({
       setFeedback("Enter one or more PATH entries first.");
       return;
     }
-    const nextEntries = insertPathEntries(entries, bulkInput);
-    const addedCount = nextEntries.length - entries.length;
+    const nextDrafts = insertPathEntryDrafts(drafts, bulkInput, createId);
+    const addedCount = nextDrafts.length - drafts.length;
     const skippedCount = parsedEntries.length - addedCount;
     if (addedCount === 0) {
       setFeedback("No entries added. Every pasted path is already present.");
       return;
     }
-    onChange(nextEntries);
+    onChange(nextDrafts);
     setBulkInput("");
     setFeedback(`Added ${addedCount} ${addedCount === 1 ? "entry" : "entries"}.${skippedCount > 0 ? ` Skipped ${skippedCount} duplicate${skippedCount === 1 ? "" : "s"}.` : ""}`);
   };
@@ -161,12 +161,12 @@ export function PathEditor({
         setFeedback("Folder selection canceled. PATH unchanged.");
         return;
       }
-      const nextEntries = insertPathEntries(entries, folder);
-      if (nextEntries === entries) {
+      const nextDrafts = insertPathEntryDrafts(drafts, folder, createId);
+      if (nextDrafts === drafts) {
         setFeedback("That folder is already in PATH. No changes made.");
         return;
       }
-      onChange(nextEntries);
+      onChange(nextDrafts);
       setFeedback("Folder added to PATH.");
     } catch (error) {
       const message = `Folder picker failed: ${apiErrorMessage(error)}`;
@@ -177,13 +177,13 @@ export function PathEditor({
     }
   };
   const removeDuplicates = () => {
-    const nextEntries = removeDuplicatePathEntries(entries);
-    const removedCount = entries.length - nextEntries.length;
+    const nextDrafts = removeDuplicatePathEntryDrafts(drafts);
+    const removedCount = drafts.length - nextDrafts.length;
     if (removedCount === 0) {
       setFeedback("No duplicate entries to remove.");
       return;
     }
-    onChange(nextEntries);
+    onChange(nextDrafts);
     setFeedback(`Removed ${removedCount} duplicate ${removedCount === 1 ? "entry" : "entries"}. Missing paths were kept.`);
   };
   const startDrag = (event: ReactDragEvent<HTMLElement>, index: number) => {
@@ -199,7 +199,7 @@ export function PathEditor({
       draggingIndex,
     );
     if (sourceIndex !== null) {
-      onChange(reorderPathEntries(entries, sourceIndex, targetIndex));
+      onChange(reorderPathEntries(drafts, sourceIndex, targetIndex));
     }
     setDraggingIndex(null);
   };
@@ -211,7 +211,7 @@ export function PathEditor({
           <div><h3>PATH entries</h3><span>{entries.length} ordered entries</span></div>
           <div className="path-toolbar-actions">
             <button className="secondary-button" disabled={disabled} onClick={() => void addFolder()} type="button"><FolderOpen size={15} /> Choose folder</button>
-            <button className="secondary-button" disabled={disabled} onClick={() => onChange([...entries, ""])} type="button"><Plus size={15} /> Add entry</button>
+            <button className="secondary-button" disabled={disabled} onClick={() => onChange(appendPathEntryDraft(drafts, "", createId))} type="button"><Plus size={15} /> Add entry</button>
           </div>
         </div>
         <div className="path-bulk-input">
@@ -236,44 +236,25 @@ export function PathEditor({
           <button className="secondary-button compact-button" disabled={disabled || checking || analyzedCounts.duplicate === 0} onClick={removeDuplicates} type="button"><Trash2 size={14} /> Remove duplicates</button>
         </div>
         <div className="path-list">
-          {visibleEntries.map(({ entry, index, status }) => {
-            const statusLabel = status
-              ? status.duplicate
-                ? "Duplicate entry"
-                : status.exists
-                  ? "Path exists"
-                  : "Path not found"
-              : checking
-                ? "Checking path..."
-                : analysisError
-                  ? "Path status unavailable"
-                  : "Path status unknown";
-            const statusClass = status
-              ? status.duplicate || !status.exists ? "warning" : "valid"
-              : "unknown";
-            const statusIcon = checking && !status
-              ? <LoaderCircle className="spin" size={15} />
-              : status
-                ? status.exists && !status.duplicate
-                  ? <FolderCheck size={16} />
-                  : <FolderX size={16} />
-                : <CircleHelp size={16} />;
-            return (
-              <div
-                className={`path-row${status?.duplicate ? " duplicate" : ""}${status && !status.exists ? " missing" : ""}${draggingIndex === index ? " dragging" : ""}`}
-                key={index}
-                onDragEnd={() => setDraggingIndex(null)}
-                onDragOver={(event) => { if (!disabled) event.preventDefault(); }}
-                onDrop={(event) => { if (!disabled) dropEntry(event, index); }}
-              >
-                <span className="path-drag-handle" draggable={!disabled} onDragStart={(event) => startDrag(event, index)} title="Drag to reorder"><GripVertical size={15} /></span>
-                <span className="path-index">{index + 1}</span>
-                <div className="path-input"><input aria-label={`PATH entry ${index + 1}`} disabled={disabled} value={entry} onChange={(event) => update(index, event.target.value)} /><small title={status?.expandedValue}>{statusLabel}</small></div>
-                <span className={`path-status ${statusClass}`}>{statusIcon}</span>
-                <div className="path-actions"><button aria-label="Move up" className="icon-button small" disabled={disabled || index === 0} onClick={() => move(index, -1)} type="button"><ArrowUp size={14} /></button><button aria-label="Move down" className="icon-button small" disabled={disabled || index === entries.length - 1} onClick={() => move(index, 1)} type="button"><ArrowDown size={14} /></button><button aria-label="Remove entry" className="icon-button small danger-icon" disabled={disabled} onClick={() => onChange(entries.filter((_, current) => current !== index))} type="button"><Trash2 size={14} /></button></div>
-              </div>
-            );
-          })}
+          {visibleEntries.map(({ draft, index, status }) => (
+            <PathRow
+              analysisError={Boolean(analysisError)}
+              checking={checking}
+              disabled={disabled}
+              draft={draft}
+              dragging={draggingIndex === index}
+              entryCount={drafts.length}
+              index={index}
+              key={draft.id}
+              onDragEnd={() => setDraggingIndex(null)}
+              onDragStart={(event) => startDrag(event, index)}
+              onDrop={(event) => dropEntry(event, index)}
+              onMove={(direction) => move(index, direction)}
+              onRemove={() => onChange(drafts.filter(({ id }) => id !== draft.id))}
+              onUpdate={(value) => update(draft.id, value)}
+              status={status}
+            />
+          ))}
           {visibleEntries.length === 0 && <div className="table-empty">{filter !== "all" && currentStatuses.length === 0 ? checking ? "Checking paths..." : analysisError ? "Path status unavailable" : "Path status unknown" : entries.length === 0 ? "No PATH entries" : `No ${filter} entries`}</div>}
         </div>
       </div>

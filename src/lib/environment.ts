@@ -3,6 +3,7 @@ import type {
   EnvironmentScope,
   EnvironmentVariable,
   PathChangeSummary,
+  PathEntryDraft,
   PathEntryStatus,
   PathStatusFilter,
   TransferMode,
@@ -79,11 +80,66 @@ export function insertPathEntries(
   return nextEntries.length === existingEntries.length ? existingEntries : nextEntries;
 }
 
-export function reorderPathEntries(
+export function createPathEntryIdFactory(prefix = "path-entry"): () => string {
+  let nextId = 0;
+  return () => `${prefix}-${nextId++}`;
+}
+
+export function createPathEntryDrafts(
   entries: string[],
+  createId: () => string,
+): PathEntryDraft[] {
+  return entries.map((value) => ({ id: createId(), value }));
+}
+
+export function appendPathEntryDraft(
+  drafts: PathEntryDraft[],
+  value: string,
+  createId: () => string,
+): PathEntryDraft[] {
+  return [...drafts, { id: createId(), value }];
+}
+
+export function updatePathEntryDrafts(
+  drafts: PathEntryDraft[],
+  id: string,
+  value: string,
+): PathEntryDraft[] {
+  return drafts.map((draft) => draft.id === id ? { ...draft, value } : draft);
+}
+
+export function insertPathEntryDrafts(
+  drafts: PathEntryDraft[],
+  input: string,
+  createId: () => string,
+): PathEntryDraft[] {
+  const existingValues = drafts.map(({ value }) => value);
+  const nextValues = insertPathEntries(existingValues, input);
+  const addedValues = nextValues.slice(existingValues.length);
+  if (addedValues.length === 0) return drafts;
+  return [
+    ...drafts,
+    ...createPathEntryDrafts(addedValues, createId),
+  ];
+}
+
+export function removeDuplicatePathEntryDrafts(
+  drafts: PathEntryDraft[],
+): PathEntryDraft[] {
+  const seen = new Set<string>();
+  return drafts.filter(({ value }) => {
+    const identity = normalizePathEntry(value);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+export function reorderPathEntries<T>(
+  entries: T[],
   sourceIndex: number,
   targetIndex: number,
-): string[] {
+): T[] {
   if (
     sourceIndex < 0 ||
     sourceIndex >= entries.length ||
@@ -200,6 +256,25 @@ export function summarizePathChanges(
   });
 
   return { added, removed, moved, orderChanged: moved.length > 0 };
+}
+
+export function finalizePathEdit(
+  originalRaw: string,
+  currentEntries: string[],
+): { value: string; summary: PathChangeSummary } {
+  const finalizedEntries = parsePathEntries(joinPathEntries(currentEntries));
+  const summary = summarizePathChanges(
+    parsePathEntries(originalRaw),
+    finalizedEntries,
+  );
+  const changed =
+    summary.added.length > 0 ||
+    summary.removed.length > 0 ||
+    summary.moved.length > 0;
+  return {
+    value: changed ? joinPathEntries(finalizedEntries) : originalRaw,
+    summary,
+  };
 }
 
 export function mergeEffectiveVariables(

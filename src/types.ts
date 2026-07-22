@@ -43,6 +43,11 @@ export interface PathEntryStatus {
 
 export type PathStatusFilter = "all" | "duplicate" | "missing";
 
+export interface PathEntryDraft {
+  id: string;
+  value: string;
+}
+
 export interface PathMovedEntry {
   value: string;
   fromIndex: number;

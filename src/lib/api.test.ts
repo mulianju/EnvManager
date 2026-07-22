@@ -32,6 +32,7 @@ describe("browser preview API contracts", () => {
 
   afterEach(() => {
     vi.doUnmock("@tauri-apps/api/core");
+    vi.doUnmock("@tauri-apps/plugin-dialog");
     vi.unstubAllGlobals();
   });
 
@@ -202,6 +203,26 @@ describe("browser preview API contracts", () => {
     });
     expect(api.apiErrorCode({ code: "variableAlreadyExists", message: "collision" }))
       .toBe("variableAlreadyExists");
+  });
+
+  it("opens the native folder picker with a single-directory payload and preserves cancellation", async () => {
+    const open = vi.fn()
+      .mockResolvedValueOnce("C:\\Program Files\\Java")
+      .mockResolvedValueOnce(null);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.doMock("@tauri-apps/plugin-dialog", () => ({ open, save: vi.fn() }));
+    const api = await import("./api");
+
+    await expect(api.pickEnvironmentFolder()).resolves.toBe("C:\\Program Files\\Java");
+    await expect(api.pickEnvironmentFolder()).resolves.toBeNull();
+    expect(open).toHaveBeenNthCalledWith(1, {
+      directory: true,
+      multiple: false,
+    });
+    expect(open).toHaveBeenNthCalledWith(2, {
+      directory: true,
+      multiple: false,
+    });
   });
 
   it("rejects stale save delete and undo receipts in browser preview", async () => {

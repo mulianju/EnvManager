@@ -152,9 +152,10 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
   .variable-header, .backup-header { display: none; }
   .variable-row { grid-template-columns: minmax(0, 1fr) 72px; gap: 6px; }
   .variable-row .value-preview, .variable-row .type-label { grid-column: 1; }
-  .effective-row { grid-template-columns: minmax(0, 1fr) 72px; }
-  .effective-row .effective-name, .effective-row .value-preview, .effective-row .source-label { grid-column: 1; }
+  .effective-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .effective-row .effective-name, .effective-row .value-preview, .effective-row .source-label { grid-column: 1; grid-row: auto; }
   .variable-row .row-actions { grid-column: 2; grid-row: 1; }
+  .effective-row .row-actions { width: 100%; grid-column: 1; grid-row: auto; flex-wrap: wrap; justify-content: flex-end; }
   .actions-menu { position: fixed; top: auto; right: 12px; bottom: 12px; left: 12px; width: auto; }
   .backup-row { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
   .backup-row > *:not(button) { grid-column: 1; }

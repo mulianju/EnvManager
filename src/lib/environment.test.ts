@@ -166,6 +166,25 @@ describe("environment helpers", () => {
     ]);
   });
 
+  it("only marks shadowed variables as conflicts when value or type differs", () => {
+    const same = mergeEffectiveVariables(
+      [variable("SAME", "value", "user")],
+      [variable("same", "value", "system")],
+    )[0];
+    const differentValue = mergeEffectiveVariables(
+      [variable("VALUE", "user", "user")],
+      [variable("value", "system", "system")],
+    )[0];
+    const differentType = mergeEffectiveVariables(
+      [variable("TYPE", "value", "user")],
+      [variable("type", "value", "system", "expandableString")],
+    )[0];
+
+    expect(same).toMatchObject({ shadowed: true, conflict: false });
+    expect(differentValue).toMatchObject({ shadowed: true, conflict: true });
+    expect(differentType).toMatchObject({ shadowed: true, conflict: true });
+  });
+
   it("formats variable copy values and escapes unsafe PowerShell names", () => {
     const regular = variable("JAVA_HOME", "C:\\Java", "user");
     expect(formatVariableForCopy(regular, "name")).toBe("JAVA_HOME");

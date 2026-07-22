@@ -150,7 +150,11 @@ export function mergeEffectiveVariables(
         ...userVariable,
         source: "user",
         shadowed: Boolean(systemVariable),
-        conflict: Boolean(systemVariable),
+        conflict: Boolean(
+          systemVariable &&
+          (userVariable.value !== systemVariable.value ||
+            userVariable.valueType !== systemVariable.valueType),
+        ),
       };
     }
 

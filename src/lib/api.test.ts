@@ -225,6 +225,67 @@ describe("browser preview API contracts", () => {
     });
   });
 
+  it("opens the native import picker with supported formats and preserves cancellation", async () => {
+    const open = vi.fn()
+      .mockResolvedValueOnce("C:\\backup\\environment.json")
+      .mockResolvedValueOnce(null);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.doMock("@tauri-apps/plugin-dialog", () => ({ open, save: vi.fn() }));
+    const api = await import("./api");
+
+    await expect(api.pickImportFile()).resolves.toBe("C:\\backup\\environment.json");
+    await expect(api.pickImportFile()).resolves.toBeNull();
+    expect(open).toHaveBeenNthCalledWith(1, {
+      multiple: false,
+      filters: [
+        { name: "Environment files", extensions: ["json", "env", "reg"] },
+      ],
+    });
+    expect(open).toHaveBeenNthCalledWith(2, {
+      multiple: false,
+      filters: [
+        { name: "Environment files", extensions: ["json", "env", "reg"] },
+      ],
+    });
+  });
+
+  it("maps export formats to native save filters and preserves cancellation", async () => {
+    const save = vi.fn()
+      .mockResolvedValueOnce("C:\\backup\\environment-all.json")
+      .mockResolvedValueOnce("C:\\backup\\environment-user.env")
+      .mockResolvedValueOnce("C:\\backup\\environment-system.reg")
+      .mockResolvedValueOnce(null);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.doMock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save }));
+    const api = await import("./api");
+
+    await expect(api.pickExportFile("json", "environment-all.json"))
+      .resolves.toBe("C:\\backup\\environment-all.json");
+    await expect(api.pickExportFile("dotEnv", "environment-user.env"))
+      .resolves.toBe("C:\\backup\\environment-user.env");
+    await expect(api.pickExportFile("registry", "environment-system.reg"))
+      .resolves.toBe("C:\\backup\\environment-system.reg");
+    await expect(api.pickExportFile("json", "environment-all.json"))
+      .resolves.toBeNull();
+
+    expect(save).toHaveBeenNthCalledWith(1, {
+      defaultPath: "environment-all.json",
+      filters: [{ name: "Environment file", extensions: ["json"] }],
+    });
+    expect(save).toHaveBeenNthCalledWith(2, {
+      defaultPath: "environment-user.env",
+      filters: [{ name: "Environment file", extensions: ["env"] }],
+    });
+    expect(save).toHaveBeenNthCalledWith(3, {
+      defaultPath: "environment-system.reg",
+      filters: [{ name: "Environment file", extensions: ["reg"] }],
+    });
+    expect(save).toHaveBeenNthCalledWith(4, {
+      defaultPath: "environment-all.json",
+      filters: [{ name: "Environment file", extensions: ["json"] }],
+    });
+  });
+
   it("rejects stale save delete and undo receipts in browser preview", async () => {
     const api = await loadPreviewApi();
     const snapshot = await api.getEnvironmentSnapshot();

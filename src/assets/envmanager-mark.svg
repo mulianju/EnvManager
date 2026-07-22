@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">EnvManager</title>
+  <desc id="description">User and system environment layers merging into one effective value.</desc>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="#202830" />
+
+  <g transform="translate(64 64) scale(2.4888889)">
+    <path
+      d="M82 248H140C202 248 205 180 258 180"
+      fill="none"
+      stroke="#5ea5ef"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="44"
+    />
+    <path
+      d="M82 112H140C202 112 205 180 258 180H300"
+      fill="none"
+      stroke="#202830"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="68"
+    />
+    <path
+      d="M82 112H140C202 112 205 180 258 180H300"
+      fill="none"
+      stroke="#49d29b"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="44"
+    />
+  </g>
+</svg>

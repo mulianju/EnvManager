@@ -9,10 +9,10 @@ import {
   Pin,
   RefreshCw,
   Search,
-  Variable,
   X,
 } from "lucide-react";
 import "./QuickPanel.css";
+import envManagerMark from "./assets/envmanager-mark.svg";
 import {
   apiErrorMessage,
   copyText,
@@ -236,7 +236,7 @@ export function QuickPanel() {
   return (
     <main className="quick-panel">
       <header className="quick-header">
-        <div className="quick-brand-mark"><Variable size={15} /></div>
+        <div className="quick-brand-mark"><img alt="" aria-hidden="true" src={envManagerMark} /></div>
         <div className="quick-brand-copy">
           <strong>EnvManager</strong>
           <span>{snapshot ? `${rows.length} effective variables` : "Quick access"}</span>

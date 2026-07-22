@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import "./App.css";
+import envManagerMark from "./assets/envmanager-mark.svg";
 import { PathEditor } from "./components/PathEditor";
 import { TransferDialog, type TransferDialogMode } from "./components/TransferDialog";
 import { EffectiveVariablesView, VariablesView } from "./components/VariableViews";
@@ -460,7 +461,7 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark"><Variable size={18} /></span>
+          <span className="brand-mark"><img alt="" aria-hidden="true" src={envManagerMark} /></span>
           <span>EnvManager</span>
         </div>
         <nav className="nav-list" aria-label="Primary navigation">

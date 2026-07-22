@@ -8,7 +8,8 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 238px minmax(0, 1fr); }
 .sidebar { min-height: 100vh; padding: 18px 12px 14px; display: flex; flex-direction: column; color: #e7ebef; background: #20262d; }
 .brand { height: 38px; padding: 0 8px; display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; }
-.brand-mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; color: #145c43; background: #d8f0e6; }
+.brand-mark { width: 28px; height: 28px; display: block; flex: none; }
+.brand-mark img { display: block; width: 100%; height: 100%; }
 .nav-list { margin-top: 24px; display: grid; gap: 4px; }
 .nav-item { width: 100%; height: 40px; padding: 0 10px; display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 0; border-radius: 5px; color: #b6c0c9; background: transparent; text-align: left; }
 .nav-item:hover { color: #fff; background: #2b333c; }

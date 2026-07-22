@@ -12,7 +12,6 @@ import {
   History,
   LoaderCircle,
   LockKeyhole,
-  Pencil,
   Plus,
   RefreshCw,
   Save,
@@ -21,26 +20,39 @@ import {
   ShieldAlert,
   ShieldCheck,
   Trash2,
+  Undo2,
   User,
   Variable,
   X,
 } from "lucide-react";
 import "./App.css";
+import { EffectiveVariablesView, VariablesView } from "./components/VariableViews";
 import {
   analyzePathEntries,
   apiErrorMessage,
+  copyText,
   deleteEnvironmentVariable,
+  getEnvironmentRevision,
   getEnvironmentSnapshot,
+  getFavorites,
   restartElevated,
   restoreEnvironmentBackup,
   saveEnvironmentVariable,
+  toggleFavorite,
+  transferEnvironmentVariable,
+  undoEnvironmentMutation,
 } from "./lib/api";
 import {
+  canTransferVariable,
+  filterEffectiveVariables,
   filterVariables,
+  formatVariableForCopy,
   isPathVariable,
   isSensitiveVariable,
   joinPathEntries,
   parsePathEntries,
+  revisionRefreshDecision,
+  transferConfirmationMessage,
 } from "./lib/environment";
 import type {
   BackupSummary,
@@ -48,47 +60,127 @@ import type {
   EnvironmentSnapshot,
   EnvironmentVariable,
   EnvironmentVariableInput,
+  FavoriteKey,
+  MutationResult,
   PathEntryStatus,
+  TransferMode,
+  VariableCopyFormat,
 } from "./types";
 
-type View = EnvironmentScope | "backups";
+type View = EnvironmentScope | "effective" | "backups";
+interface NoticeState {
+  message: string;
+  undoBackupIds?: string[];
+}
 
 const navigation: Array<{ id: View; label: string; icon: typeof User }> = [
   { id: "user", label: "User variables", icon: User },
   { id: "system", label: "System variables", icon: Shield },
+  { id: "effective", label: "Effective", icon: Variable },
   { id: "backups", label: "Backups", icon: History },
 ];
 
 function App() {
   const [view, setView] = useState<View>("user");
   const [snapshot, setSnapshot] = useState<EnvironmentSnapshot | null>(null);
+  const [favorites, setFavorites] = useState<FavoriteKey[]>([]);
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<EnvironmentVariableInput | null>(null);
+  const [activeMenuKey, setActiveMenuKey] = useState<string | null>(null);
+  const [deferredRevision, setDeferredRevision] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<NoticeState | null>(null);
   const requestId = useRef(0);
+  const snapshotRef = useRef<EnvironmentSnapshot | null>(null);
+  const interactionOpenRef = useRef(false);
+  const busyRef = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const commitSnapshot = useCallback((next: EnvironmentSnapshot) => {
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }, []);
+
+  const refresh = useCallback(async (showLoading = true) => {
     const currentRequest = ++requestId.current;
-    setLoading(true);
+    if (showLoading) setLoading(true);
     setError(null);
     try {
       const next = await getEnvironmentSnapshot();
-      if (requestId.current === currentRequest) setSnapshot(next);
+      if (requestId.current === currentRequest) {
+        commitSnapshot(next);
+        setDeferredRevision(null);
+      }
+      try {
+        const nextFavorites = await getFavorites();
+        if (requestId.current === currentRequest) setFavorites(nextFavorites);
+      } catch (favoriteError) {
+        if (requestId.current === currentRequest) {
+          setError(`Variables loaded, but favorites could not be read: ${apiErrorMessage(favoriteError)}`);
+        }
+      }
     } catch (nextError) {
       if (requestId.current === currentRequest) setError(apiErrorMessage(nextError));
     } finally {
       if (requestId.current === currentRequest) setLoading(false);
     }
-  }, []);
+  }, [commitSnapshot]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
+  const interactionOpen = Boolean(editor || activeMenuKey);
+  useEffect(() => {
+    interactionOpenRef.current = interactionOpen;
+  }, [interactionOpen]);
+
+  useEffect(() => {
+    if (!activeMenuKey) return;
+    const closeMenu = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".actions-menu-wrap")) return;
+      setActiveMenuKey(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActiveMenuKey(null);
+    };
+    document.addEventListener("pointerdown", closeMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [activeMenuKey]);
+
+  useEffect(() => {
+    const poll = async () => {
+      const current = snapshotRef.current;
+      if (!current || busyRef.current) return;
+      try {
+        const observedRevision = await getEnvironmentRevision();
+        const decision = revisionRefreshDecision(
+          current.revision,
+          observedRevision,
+          interactionOpenRef.current,
+        );
+        if (decision === "defer") {
+          setDeferredRevision(observedRevision);
+        } else if (decision === "refresh") {
+          await refresh(false);
+        }
+      } catch (nextError) {
+        setError(apiErrorMessage(nextError));
+      }
+    };
+    const interval = window.setInterval(() => void poll(), 2000);
+    return () => window.clearInterval(interval);
+  }, [refresh]);
+
   const perform = async <T,>(action: () => Promise<T>): Promise<T | null> => {
+    if (busyRef.current) return null;
+    busyRef.current = true;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -98,11 +190,12 @@ function App() {
       setError(apiErrorMessage(nextError));
       return null;
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
 
-  const scope = view === "backups" ? null : view;
+  const scope = view === "user" || view === "system" ? view : null;
   const variables = useMemo(() => {
     if (!snapshot || !scope) return [];
     return filterVariables(
@@ -110,6 +203,25 @@ function App() {
       query,
     );
   }, [snapshot, scope, query]);
+  const effectiveVariables = useMemo(
+    () => filterEffectiveVariables(snapshot?.effectiveVariables ?? [], query),
+    [snapshot, query],
+  );
+
+  const reconcileFavorites = async () => {
+    try {
+      setFavorites(await getFavorites());
+    } catch (nextError) {
+      setError(apiErrorMessage(nextError));
+    }
+  };
+
+  const acceptMutation = (result: MutationResult, message: string) => {
+    commitSnapshot(result.snapshot);
+    setDeferredRevision(null);
+    setNotice({ message, undoBackupIds: result.undoBackupIds });
+    void reconcileFavorites();
+  };
 
   const openVariable = (variable: EnvironmentVariable) => {
     setEditor({
@@ -135,9 +247,8 @@ function App() {
   const saveVariable = async (input: EnvironmentVariableInput) => {
     const next = await perform(() => saveEnvironmentVariable(input));
     if (next) {
-      setSnapshot(next.snapshot);
+      acceptMutation(next, input.originalName ? "Variable updated." : "Variable created.");
       setEditor(null);
-      setNotice(input.originalName ? "Variable updated." : "Variable created.");
     }
   };
 
@@ -151,10 +262,80 @@ function App() {
       deleteEnvironmentVariable(input.scope, input.originalName ?? input.name),
     );
     if (next) {
-      setSnapshot(next.snapshot);
+      acceptMutation(next, "Variable deleted. A backup was created.");
       setEditor(null);
-      setNotice("Variable deleted. A backup was created.");
     }
+  };
+
+  const undoMutation = async (backupIds: string[]) => {
+    const next = await perform(() => undoEnvironmentMutation(backupIds));
+    if (next) acceptMutation(next, "Change undone. You can undo this restore too.");
+  };
+
+  const copyVariable = async (
+    variable: Pick<EnvironmentVariable, "name" | "value">,
+    format: VariableCopyFormat,
+  ) => {
+    setActiveMenuKey(null);
+    const result = await perform(() => copyText(formatVariableForCopy(variable, format)));
+    if (result !== null) {
+      const label = format === "powershell" ? "PowerShell reference" : format;
+      setNotice({ message: `Copied ${label}.` });
+    }
+  };
+
+  const toggleVariableFavorite = async (variable: EnvironmentVariable) => {
+    setActiveMenuKey(null);
+    const next = await perform(() =>
+      toggleFavorite({ scope: variable.scope, name: variable.name }),
+    );
+    if (next) {
+      setFavorites(next);
+      setNotice({ message: isFavorite(favorites, variable) ? "Favorite removed." : "Favorite added." });
+    }
+  };
+
+  const transferVariable = async (variable: EnvironmentVariable, mode: TransferMode) => {
+    setActiveMenuKey(null);
+    if (!snapshot || !canTransferVariable(variable.scope, mode, snapshot.isElevated)) {
+      setError("Administrator permission is required for this transfer.");
+      return;
+    }
+    const targetScope: EnvironmentScope = variable.scope === "user" ? "system" : "user";
+    const targetVariables = targetScope === "user"
+      ? snapshot.userVariables
+      : snapshot.systemVariables;
+    const overwrite = targetVariables.some(
+      (item) => item.name.toLowerCase() === variable.name.toLowerCase(),
+    );
+    const input = {
+      sourceScope: variable.scope,
+      targetScope,
+      name: variable.name,
+      mode,
+      overwrite,
+    };
+    const confirmation = transferConfirmationMessage(input);
+    if (confirmation && !window.confirm(confirmation)) return;
+    const next = await perform(() => transferEnvironmentVariable(input));
+    if (next) {
+      acceptMutation(
+        next,
+        `${variable.name} ${mode === "move" ? "moved" : "copied"} to ${targetScope} variables.`,
+      );
+    }
+  };
+
+  const requestRefresh = async () => {
+    if (interactionOpenRef.current) {
+      const confirmed = window.confirm(
+        "Close the open editor or menu and discard unsaved changes before refreshing?",
+      );
+      if (!confirmed) return;
+      setEditor(null);
+      setActiveMenuKey(null);
+    }
+    await refresh();
   };
 
   const elevate = async () => {
@@ -177,7 +358,9 @@ function App() {
                 ? snapshot.userVariables.length
                 : item.id === "system"
                   ? snapshot.systemVariables.length
-                  : snapshot.backups.length
+                  : item.id === "effective"
+                    ? snapshot.effectiveVariables.length
+                    : snapshot.backups.length
               : 0;
             return (
               <button
@@ -187,6 +370,7 @@ function App() {
                 onClick={() => {
                   setView(item.id);
                   setQuery("");
+                  setActiveMenuKey(null);
                 }}
                 type="button"
               >
@@ -210,13 +394,13 @@ function App() {
             <p>{viewSubtitle(view)}</p>
           </div>
           <div className="topbar-actions">
-            {scope && (
+            {view !== "backups" && (
               <label className="search-control">
                 <Search size={16} />
                 <input aria-label="Search variables" placeholder="Search" value={query} onChange={(event) => setQuery(event.target.value)} />
               </label>
             )}
-            <button className="icon-button" disabled={loading} onClick={() => void refresh()} title="Refresh" type="button">
+            <button className="icon-button" disabled={loading || busy} onClick={() => void requestRefresh()} title="Refresh" type="button">
               <RefreshCw className={loading ? "spin" : ""} size={17} />
             </button>
             {scope && (
@@ -228,7 +412,28 @@ function App() {
         </header>
 
         {error && <Message kind="error" onClose={() => setError(null)}>{error}</Message>}
-        {notice && <Message kind="success" onClose={() => setNotice(null)}>{notice}</Message>}
+        {deferredRevision && (
+          <Message
+            actionLabel="Refresh"
+            kind="refresh"
+            onAction={() => void requestRefresh()}
+            onClose={() => setDeferredRevision(null)}
+          >
+            Environment values changed outside EnvManager. Your open work was not replaced.
+          </Message>
+        )}
+        {notice && (
+          <Message
+            actionLabel={notice.undoBackupIds?.length ? "Undo" : undefined}
+            kind="success"
+            onAction={notice.undoBackupIds?.length
+              ? () => void undoMutation(notice.undoBackupIds!)
+              : undefined}
+            onClose={() => setNotice(null)}
+          >
+            {notice.message}
+          </Message>
+        )}
 
         {loading && !snapshot ? (
           <div className="loading-state"><LoaderCircle className="spin" size={24} /> Loading environment</div>
@@ -243,10 +448,25 @@ function App() {
             )}
             {scope ? (
               <VariablesView
+                activeMenuKey={activeMenuKey}
+                busy={busy}
                 canEdit={scope === "user" || snapshot.isElevated}
+                favorites={favorites}
+                isElevated={snapshot.isElevated}
+                onCopy={copyVariable}
+                onFavorite={toggleVariableFavorite}
+                onMenuChange={setActiveMenuKey}
                 onOpen={openVariable}
+                onTransfer={transferVariable}
                 query={query}
                 variables={variables}
+              />
+            ) : view === "effective" ? (
+              <EffectiveVariablesView
+                busy={busy}
+                onCopy={copyVariable}
+                query={query}
+                variables={effectiveVariables}
               />
             ) : (
               <BackupsView
@@ -259,8 +479,7 @@ function App() {
                   if (!window.confirm(`Restore this ${backup.scope} backup? Current values in that scope will be replaced.`)) return;
                   const next = await perform(() => restoreEnvironmentBackup(backup.id));
                   if (next) {
-                    setSnapshot(next.snapshot);
-                    setNotice("Backup restored. A rollback backup was created.");
+                    acceptMutation(next, "Backup restored. A rollback backup was created.");
                   }
                 }}
                 snapshot={snapshot}
@@ -268,7 +487,7 @@ function App() {
             )}
           </>
         ) : (
-          <div className="empty-state"><AlertCircle size={26} /><strong>Unable to read environment variables</strong><button className="primary-button" onClick={() => void refresh()} type="button"><RefreshCw size={16} /> Retry</button></div>
+          <div className="empty-state"><AlertCircle size={26} /><strong>Unable to read environment variables</strong><button className="primary-button" onClick={() => void requestRefresh()} type="button"><RefreshCw size={16} /> Retry</button></div>
         )}
       </main>
 
@@ -282,34 +501,6 @@ function App() {
         />
       )}
     </div>
-  );
-}
-
-function VariablesView({ variables, query, canEdit, onOpen }: { variables: EnvironmentVariable[]; query: string; canEdit: boolean; onOpen: (variable: EnvironmentVariable) => void }) {
-  const [revealed, setRevealed] = useState<Set<string>>(new Set());
-  return (
-    <section className="content-section">
-      <div className="table-summary"><span>{variables.length} variables</span>{query && <span>Filtered by “{query}”</span>}</div>
-      <div className="variable-table">
-        <div className="variable-header"><span>Name</span><span>Value</span><span>Type</span><span /></div>
-        {variables.map((variable) => {
-          const sensitive = isSensitiveVariable(variable.name);
-          const isRevealed = revealed.has(variable.name.toLowerCase());
-          return (
-            <div className="variable-row" key={variable.name}>
-              <strong>{variable.name}</strong>
-              <span className={sensitive && !isRevealed ? "value-preview masked" : "value-preview"}>{sensitive && !isRevealed ? "••••••••••••" : variable.value || "(empty)"}</span>
-              <span className="type-label">{variable.valueType === "expandableString" ? "Expandable" : "String"}</span>
-              <div className="row-actions">
-                {sensitive && <button className="icon-button small" aria-label={isRevealed ? "Hide value" : "Show value"} onClick={() => setRevealed((current) => toggleSetValue(current, variable.name.toLowerCase()))} type="button">{isRevealed ? <EyeOff size={15} /> : <Eye size={15} />}</button>}
-                <button className="icon-button small" aria-label={`Edit ${variable.name}`} disabled={!canEdit} onClick={() => onOpen(variable)} type="button"><Pencil size={15} /></button>
-              </div>
-            </div>
-          );
-        })}
-        {variables.length === 0 && <div className="table-empty">{query ? "No matching variables" : "No variables in this scope"}</div>}
-      </div>
-    </section>
   );
 }
 
@@ -420,23 +611,55 @@ function PathEditor({ entries, statuses, checking, onChange }: { entries: string
   );
 }
 
-function Message({ kind, children, onClose }: { kind: "error" | "success"; children: string; onClose: () => void }) {
-  return <div className={`message ${kind}-message`} role={kind === "error" ? "alert" : "status"}>{kind === "error" ? <AlertCircle size={16} /> : <Check size={16} />}<span>{children}</span><button aria-label="Dismiss message" onClick={onClose} type="button"><X size={15} /></button></div>;
+function Message({
+  kind,
+  children,
+  actionLabel,
+  onAction,
+  onClose,
+}: {
+  kind: "error" | "success" | "refresh";
+  children: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  onClose: () => void;
+}) {
+  const icon = kind === "error"
+    ? <AlertCircle size={16} />
+    : kind === "refresh"
+      ? <RefreshCw size={16} />
+      : <Check size={16} />;
+  return (
+    <div className={`message ${kind}-message`} role={kind === "error" ? "alert" : "status"}>
+      {icon}
+      <span>{children}</span>
+      {actionLabel && onAction && (
+        <button className="message-action" onClick={onAction} type="button">
+          {actionLabel === "Undo" && <Undo2 size={14} />}{actionLabel}
+        </button>
+      )}
+      <button aria-label="Dismiss message" onClick={onClose} type="button"><X size={15} /></button>
+    </div>
+  );
 }
 
-function toggleSetValue(current: Set<string>, value: string): Set<string> {
-  const next = new Set(current);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  return next;
+function isFavorite(
+  favorites: FavoriteKey[],
+  variable: Pick<EnvironmentVariable, "scope" | "name">,
+): boolean {
+  return favorites.some(
+    (favorite) =>
+      favorite.scope === variable.scope &&
+      favorite.name.toLowerCase() === variable.name.toLowerCase(),
+  );
 }
 
 function viewTitle(view: View): string {
-  return { user: "User variables", system: "System variables", backups: "Backups" }[view];
+  return { user: "User variables", system: "System variables", effective: "Effective environment", backups: "Backups" }[view];
 }
 
 function viewSubtitle(view: View): string {
-  return { user: "HKCU\\Environment", system: "HKLM\\...\\Session Manager\\Environment", backups: "Automatic restore points" }[view];
+  return { user: "HKCU\\Environment", system: "HKLM\\...\\Session Manager\\Environment", effective: "Environment inherited by newly launched processes", backups: "Automatic restore points" }[view];
 }
 
 function backupReason(reason: string): string {

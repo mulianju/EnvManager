@@ -1,9 +1,12 @@
 import type {
   EffectiveEnvironmentVariable,
+  EnvironmentScope,
   EnvironmentVariable,
   PathChangeSummary,
   PathEntryStatus,
   PathStatusFilter,
+  TransferMode,
+  TransferVariableInput,
   VariableCopyFormat,
 } from "../types";
 
@@ -161,7 +164,7 @@ export function mergeEffectiveVariables(
 }
 
 export function formatVariableForCopy(
-  variable: EnvironmentVariable,
+  variable: Pick<EnvironmentVariable, "name" | "value">,
   format: VariableCopyFormat,
 ): string {
   if (format === "name") return variable.name;
@@ -192,4 +195,55 @@ export function filterVariables(
       variable.name.toLowerCase().includes(normalized) ||
       variable.value.toLowerCase().includes(normalized),
   );
+}
+
+export function filterEffectiveVariables(
+  variables: EffectiveEnvironmentVariable[],
+  query: string,
+): EffectiveEnvironmentVariable[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return variables;
+  return variables.filter(
+    (variable) =>
+      variable.name.toLowerCase().includes(normalized) ||
+      variable.value.toLowerCase().includes(normalized),
+  );
+}
+
+export function canTransferVariable(
+  sourceScope: EnvironmentScope,
+  mode: TransferMode,
+  isElevated: boolean,
+): boolean {
+  const targetScope = sourceScope === "user" ? "system" : "user";
+  const mutatesSystem = targetScope === "system" ||
+    (mode === "move" && sourceScope === "system");
+  return !mutatesSystem || isElevated;
+}
+
+export function transferConfirmationMessage(
+  input: TransferVariableInput,
+): string | null {
+  const source = scopeDisplayName(input.sourceScope);
+  const target = scopeDisplayName(input.targetScope);
+  const effects: string[] = [];
+  if (input.overwrite) effects.push(`overwrite the existing ${target} value`);
+  if (input.mode === "move") effects.push(`remove it from ${source}`);
+  if (effects.length === 0) return null;
+  return `${input.mode === "move" ? "Move" : "Copy"} ${input.name} from ${source} to ${target} and ${effects.join(" and ")}?`;
+}
+
+export type RevisionRefreshDecision = "unchanged" | "refresh" | "defer";
+
+export function revisionRefreshDecision(
+  currentRevision: string,
+  observedRevision: string,
+  interactionOpen: boolean,
+): RevisionRefreshDecision {
+  if (currentRevision === observedRevision) return "unchanged";
+  return interactionOpen ? "defer" : "refresh";
+}
+
+function scopeDisplayName(scope: EnvironmentScope): string {
+  return scope === "user" ? "User" : "System";
 }

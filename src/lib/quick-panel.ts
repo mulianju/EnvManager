@@ -34,10 +34,10 @@ export function buildQuickRows(
     .map((variable) => {
       const favoriteKey = quickFavoriteKey(variable);
       const isFavorite = variable.source === "combined"
-        ? favorites.some((favorite) => namesEqualAscii(favorite.name, variable.name))
+        ? isCombinedPathFavorite(variable.name, favorites)
         : favoriteKey !== null && favorites.some((favorite) =>
           favorite.scope === favoriteKey.scope &&
-          namesEqualAscii(favorite.name, favoriteKey.name)
+          favorite.name === favoriteKey.name
         );
       return {
         ...variable,
@@ -90,6 +90,36 @@ export function nextQuickSelection(
   return Math.min(Math.max(currentIndex, -1), rowCount - 1);
 }
 
+export function nextQuickSelectedId(
+  rows: Array<Pick<QuickPanelRow, "id">>,
+  selectedId: string | null,
+  key: QuickSelectionKey,
+): string | null {
+  const currentIndex = selectedId === null
+    ? -1
+    : rows.findIndex(({ id }) => id === selectedId);
+  const nextIndex = nextQuickSelection(currentIndex, key, rows.length);
+  return rows[nextIndex]?.id ?? null;
+}
+
+export function shouldHandleQuickKey(
+  key: QuickSelectionKey,
+  isSearchInput: boolean,
+  hasQuery: boolean,
+): boolean {
+  return !(
+    isSearchInput &&
+    hasQuery &&
+    (key === "Home" || key === "End")
+  );
+}
+
+export function resetQuickDisclosure(
+  _revealedRows: ReadonlySet<string>,
+): Set<string> {
+  return new Set();
+}
+
 export function shouldRefreshQuick(
   currentRevision: string,
   observedRevision: string,
@@ -98,8 +128,16 @@ export function shouldRefreshQuick(
   return trigger === "focus" || currentRevision !== observedRevision;
 }
 
-function namesEqualAscii(left: string, right: string): boolean {
-  return asciiLower(left) === asciiLower(right);
+function isCombinedPathFavorite(
+  combinedName: string,
+  favorites: FavoriteKey[],
+): boolean {
+  return isAsciiPathName(combinedName) &&
+    favorites.some(({ name }) => isAsciiPathName(name));
+}
+
+function isAsciiPathName(name: string): boolean {
+  return asciiLower(name) === "path";
 }
 
 function asciiLower(value: string): string {

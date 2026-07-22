@@ -5,10 +5,13 @@ import type {
 } from "../types";
 import {
   buildQuickRows,
+  nextQuickSelectedId,
   nextQuickSelection,
   quickCopyValue,
   quickDisplayValue,
   quickFavoriteKey,
+  resetQuickDisclosure,
+  shouldHandleQuickKey,
   shouldRefreshQuick,
 } from "./quick-panel";
 
@@ -75,6 +78,14 @@ describe("quick panel row model", () => {
     expect(systemFavorite[0]).toMatchObject({ name: "Path", isFavorite: true });
   });
 
+  it("requires the reconciled display name for single-source favorites", () => {
+    const rows = buildQuickRows(effectiveVariables, [
+      { scope: "user", name: "z_user_token" },
+    ], "");
+
+    expect(rows.find(({ name }) => name === "Z_USER_TOKEN")?.isFavorite).toBe(false);
+  });
+
   it("masks sensitive display values without changing reveal or copied values", () => {
     const [row] = buildQuickRows(effectiveVariables, [], "token");
 
@@ -103,6 +114,45 @@ describe("quick panel keyboard selection", () => {
     expect(nextQuickSelection(99, "Enter", 3)).toBe(2);
     expect(nextQuickSelection(-1, "Escape", 3)).toBe(-1);
     expect(nextQuickSelection(0, "ArrowDown", 0)).toBe(-1);
+  });
+
+  it("keeps selection by row identity across favorite reordering", () => {
+    const initialRows = buildQuickRows(effectiveVariables, [], "");
+    const selectedId = initialRows.find(({ name }) => name === "SystemRoot")!.id;
+    const reorderedRows = buildQuickRows(effectiveVariables, [
+      { scope: "system", name: "SystemRoot" },
+    ], "");
+
+    expect(nextQuickSelectedId(reorderedRows, selectedId, "Enter")).toBe(selectedId);
+  });
+
+  it("clears missing identities and wraps navigation using the visible rows", () => {
+    const filteredRows = buildQuickRows(effectiveVariables, [], "java");
+    expect(nextQuickSelectedId(filteredRows, "system:SystemRoot", "Enter")).toBeNull();
+
+    const allRows = buildQuickRows(effectiveVariables, [], "");
+    const lastRow = allRows[allRows.length - 1];
+    expect(nextQuickSelectedId(allRows, lastRow.id, "ArrowDown"))
+      .toBe(allRows[0].id);
+    expect(nextQuickSelectedId(allRows, allRows[0].id, "ArrowUp"))
+      .toBe(lastRow.id);
+  });
+
+  it("preserves Home and End cursor behavior for a non-empty search input", () => {
+    expect(shouldHandleQuickKey("Home", true, true)).toBe(false);
+    expect(shouldHandleQuickKey("End", true, true)).toBe(false);
+    expect(shouldHandleQuickKey("Home", true, false)).toBe(true);
+    expect(shouldHandleQuickKey("ArrowDown", true, true)).toBe(true);
+  });
+});
+
+describe("quick panel sensitive disclosure", () => {
+  it("clears revealed row identities without retaining them for refreshed values", () => {
+    const previous = new Set(["user:Z_USER_TOKEN"]);
+    const reset = resetQuickDisclosure(previous);
+
+    expect(reset).toEqual(new Set());
+    expect(previous).toEqual(new Set(["user:Z_USER_TOKEN"]));
   });
 });
 

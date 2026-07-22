@@ -22,9 +22,11 @@ import {
 } from "./lib/api";
 import {
   buildQuickRows,
-  nextQuickSelection,
+  nextQuickSelectedId,
   quickCopyValue,
   quickDisplayValue,
+  resetQuickDisclosure,
+  shouldHandleQuickKey,
   shouldRefreshQuick,
   type QuickSelectionKey,
 } from "./lib/quick-panel";
@@ -51,7 +53,7 @@ export function QuickPanel() {
   const [snapshot, setSnapshot] = useState<EnvironmentSnapshot | null>(null);
   const [favorites, setFavorites] = useState<FavoriteKey[]>([]);
   const [query, setQuery] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [revealedRows, setRevealedRows] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -69,10 +71,12 @@ export function QuickPanel() {
     () => buildQuickRows(snapshot?.effectiveVariables ?? [], favorites, query),
     [snapshot, favorites, query],
   );
+  const selectedIndex = rows.findIndex(({ id }) => id === selectedRowId);
 
   const refresh = useCallback(async (showLoading: boolean) => {
     const generation = ++requestGeneration.current;
     revisionGeneration.current += 1;
+    setRevealedRows(resetQuickDisclosure);
     busyRef.current = true;
     if (showLoading) setLoading(true);
     else setRefreshing(true);
@@ -118,9 +122,17 @@ export function QuickPanel() {
   }, [refresh]);
 
   useEffect(() => {
-    const refreshOnFocus = () => void refresh(false);
+    const clearDisclosure = () => setRevealedRows(resetQuickDisclosure);
+    const refreshOnFocus = () => {
+      clearDisclosure();
+      void refresh(false);
+    };
     window.addEventListener("focus", refreshOnFocus);
-    return () => window.removeEventListener("focus", refreshOnFocus);
+    window.addEventListener("blur", clearDisclosure);
+    return () => {
+      window.removeEventListener("focus", refreshOnFocus);
+      window.removeEventListener("blur", clearDisclosure);
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -151,11 +163,10 @@ export function QuickPanel() {
   }, [refresh]);
 
   useEffect(() => {
-    setSelectedIndex((current) => {
-      if (rows.length === 0 || current < 0) return -1;
-      return Math.min(current, rows.length - 1);
-    });
-  }, [rows.length, query]);
+    setSelectedRowId((current) =>
+      current && rows.some(({ id }) => id === current) ? current : null
+    );
+  }, [rows]);
 
   useEffect(() => {
     if (selectedIndex >= 0) {
@@ -189,12 +200,15 @@ export function QuickPanel() {
       if (target instanceof Element && target.closest("button")) return;
 
       const key = event.key as QuickSelectionKey;
+      const isSearchInput =
+        target instanceof HTMLInputElement && target.type === "search";
+      if (!shouldHandleQuickKey(key, isSearchInput, query.length > 0)) return;
       if (key === "Escape") {
-        if (!query && revealedRows.size === 0 && selectedIndex < 0) return;
+        if (!query && revealedRows.size === 0 && selectedRowId === null) return;
         event.preventDefault();
         setQuery("");
-        setRevealedRows(new Set());
-        setSelectedIndex(-1);
+        setRevealedRows(resetQuickDisclosure);
+        setSelectedRowId(null);
         return;
       }
       if (key === "Enter") {
@@ -204,15 +218,15 @@ export function QuickPanel() {
         return;
       }
       event.preventDefault();
-      setSelectedIndex((current) => nextQuickSelection(current, key, rows.length));
+      setSelectedRowId((current) => nextQuickSelectedId(rows, current, key));
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [copyRow, query, revealedRows.size, rows.length, selectedIndex]);
+  }, [copyRow, query, revealedRows.size, rows, selectedIndex, selectedRowId]);
 
   const clearSearch = () => {
     setQuery("");
-    setSelectedIndex(-1);
+    setSelectedRowId(null);
   };
 
   return (
@@ -244,7 +258,6 @@ export function QuickPanel() {
           placeholder="Search name or value"
           aria-label="Search effective variables"
           aria-controls="quick-variable-list"
-          aria-activedescendant={selectedIndex >= 0 ? `quick-row-${selectedIndex}` : undefined}
           onChange={(event) => setQuery(event.target.value)}
         />
         {query && (
@@ -262,7 +275,7 @@ export function QuickPanel() {
       <section
         id="quick-variable-list"
         className="quick-list"
-        role="listbox"
+        role="list"
         aria-label="Effective environment variables"
       >
         {loading && !snapshot ? (
@@ -279,10 +292,9 @@ export function QuickPanel() {
               key={row.id}
               id={`quick-row-${index}`}
               ref={(element) => { rowRefs.current[index] = element; }}
-              className={`quick-row${selectedIndex === index ? " selected" : ""}`}
-              role="option"
-              aria-selected={selectedIndex === index}
-              onClick={() => setSelectedIndex(index)}
+              className={`quick-row${selectedRowId === row.id ? " selected" : ""}`}
+              role="listitem"
+              onClick={() => setSelectedRowId(row.id)}
             >
               <div className="quick-row-content">
                 <div className="quick-row-title">

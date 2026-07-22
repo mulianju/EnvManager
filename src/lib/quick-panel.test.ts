@@ -1,0 +1,130 @@
+import { describe, expect, it } from "vitest";
+import type {
+  EffectiveEnvironmentVariable,
+  FavoriteKey,
+} from "../types";
+import {
+  buildQuickRows,
+  nextQuickSelection,
+  quickCopyValue,
+  quickDisplayValue,
+  quickFavoriteKey,
+  shouldRefreshQuick,
+} from "./quick-panel";
+
+const effectiveVariables: EffectiveEnvironmentVariable[] = [
+  effective("Z_USER_TOKEN", "raw-secret", "user"),
+  effective("SystemRoot", "C:\\Windows", "system"),
+  effective("Path", "C:\\Windows;C:\\UserBin", "combined"),
+  effective("JAVA_HOME", "C:\\Java", "user"),
+];
+
+describe("quick panel row model", () => {
+  it("filters Effective variables by name or value", () => {
+    expect(buildQuickRows(effectiveVariables, [], "java").map(({ name }) => name))
+      .toEqual(["JAVA_HOME"]);
+    expect(buildQuickRows(effectiveVariables, [], "userbin").map(({ name }) => name))
+      .toEqual(["Path"]);
+    expect(buildQuickRows(effectiveVariables, [], "  ").map(({ name }) => name))
+      .toEqual(effectiveVariables.map(({ name }) => name));
+  });
+
+  it("puts favorites first while preserving the Effective order within each group", () => {
+    const favorites: FavoriteKey[] = [
+      { scope: "user", name: "JAVA_HOME" },
+      { scope: "user", name: "Z_USER_TOKEN" },
+    ];
+
+    const rows = buildQuickRows(effectiveVariables, favorites, "");
+
+    expect(rows.map(({ name }) => name)).toEqual([
+      "Z_USER_TOKEN",
+      "JAVA_HOME",
+      "SystemRoot",
+      "Path",
+    ]);
+    expect(rows.map(({ isFavorite }) => isFavorite)).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ]);
+  });
+
+  it("maps single-source rows to their persisted favorite identity", () => {
+    expect(quickFavoriteKey(effectiveVariables[0])).toEqual({
+      scope: "user",
+      name: "Z_USER_TOKEN",
+    });
+    expect(quickFavoriteKey(effectiveVariables[1])).toEqual({
+      scope: "system",
+      name: "SystemRoot",
+    });
+    expect(quickFavoriteKey(effectiveVariables[2])).toBeNull();
+  });
+
+  it("treats combined PATH as favorite when either underlying scope is pinned", () => {
+    const userFavorite = buildQuickRows(effectiveVariables, [
+      { scope: "user", name: "PATH" },
+    ], "");
+    const systemFavorite = buildQuickRows(effectiveVariables, [
+      { scope: "system", name: "path" },
+    ], "");
+
+    expect(userFavorite[0]).toMatchObject({ name: "Path", isFavorite: true });
+    expect(systemFavorite[0]).toMatchObject({ name: "Path", isFavorite: true });
+  });
+
+  it("masks sensitive display values without changing reveal or copied values", () => {
+    const [row] = buildQuickRows(effectiveVariables, [], "token");
+
+    expect(row).toMatchObject({
+      name: "Z_USER_TOKEN",
+      value: "raw-secret",
+      isSensitive: true,
+    });
+    expect(quickDisplayValue(row, false)).not.toContain("raw-secret");
+    expect(quickDisplayValue(row, true)).toBe("raw-secret");
+    expect(quickCopyValue(row)).toBe("raw-secret");
+  });
+});
+
+describe("quick panel keyboard selection", () => {
+  it("wraps ArrowUp and ArrowDown and starts from the nearest edge", () => {
+    expect(nextQuickSelection(-1, "ArrowDown", 3)).toBe(0);
+    expect(nextQuickSelection(2, "ArrowDown", 3)).toBe(0);
+    expect(nextQuickSelection(-1, "ArrowUp", 3)).toBe(2);
+    expect(nextQuickSelection(0, "ArrowUp", 3)).toBe(2);
+  });
+
+  it("supports Home and End and never returns an out-of-bounds selection", () => {
+    expect(nextQuickSelection(2, "Home", 4)).toBe(0);
+    expect(nextQuickSelection(0, "End", 4)).toBe(3);
+    expect(nextQuickSelection(99, "Enter", 3)).toBe(2);
+    expect(nextQuickSelection(-1, "Escape", 3)).toBe(-1);
+    expect(nextQuickSelection(0, "ArrowDown", 0)).toBe(-1);
+  });
+});
+
+describe("quick panel refresh decision", () => {
+  it("polls only changed revisions but always refreshes when the window regains focus", () => {
+    expect(shouldRefreshQuick("rev-1", "rev-1", "poll")).toBe(false);
+    expect(shouldRefreshQuick("rev-1", "rev-2", "poll")).toBe(true);
+    expect(shouldRefreshQuick("rev-1", "rev-1", "focus")).toBe(true);
+  });
+});
+
+function effective(
+  name: string,
+  value: string,
+  source: "user" | "system" | "combined",
+): EffectiveEnvironmentVariable {
+  return {
+    name,
+    value,
+    valueType: "string",
+    source,
+    shadowed: false,
+    conflict: false,
+  };
+}

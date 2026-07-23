@@ -10,7 +10,8 @@ import {
   FileUp,
   History,
   LoaderCircle,
-  LockKeyhole,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   RefreshCw,
   Save,
@@ -27,6 +28,7 @@ import {
 import "./App.css";
 import envManagerMark from "./assets/envmanager-mark.svg";
 import { PathEditor } from "./components/PathEditor";
+import { TablePagination, useTablePagination } from "./components/TablePagination";
 import { TransferDialog, type TransferDialogMode } from "./components/TransferDialog";
 import { EffectiveVariablesView, VariablesView } from "./components/VariableViews";
 import {
@@ -95,6 +97,7 @@ const navigation: Array<{ id: View; label: string; icon: typeof User }> = [
 
 function App() {
   const [view, setView] = useState<View>("user");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [snapshot, setSnapshot] = useState<EnvironmentSnapshot | null>(null);
   const [favorites, setFavorites] = useState<FavoriteKey[]>([]);
   const [query, setQuery] = useState("");
@@ -458,13 +461,13 @@ function App() {
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
+      <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="brand">
           <span className="brand-mark"><img alt="" aria-hidden="true" src={envManagerMark} /></span>
-          <span>EnvManager</span>
+          <span className="brand-name">EnvManager</span>
         </div>
-        <nav className="nav-list" aria-label="Primary navigation">
+        <nav className="nav-list" id="primary-navigation" aria-label="Primary navigation">
           {navigation.map((item) => {
             const Icon = item.icon;
             const count = snapshot
@@ -479,6 +482,7 @@ function App() {
             return (
               <button
                 aria-label={item.label}
+                aria-current={view === item.id ? "page" : undefined}
                 className={view === item.id ? "nav-item active" : "nav-item"}
                 key={item.id}
                 onClick={() => {
@@ -486,18 +490,28 @@ function App() {
                   setQuery("");
                   setActiveMenuKey(null);
                 }}
+                title={sidebarCollapsed ? item.label : undefined}
                 type="button"
               >
                 <Icon size={17} />
-                <span>{item.label}</span>
+                <span className="nav-item-label">{item.label}</span>
                 <small>{count}</small>
               </button>
             );
           })}
         </nav>
-        <div className={snapshot?.isElevated ? "access-status elevated" : "access-status"}>
-          {snapshot?.isElevated ? <ShieldCheck size={16} /> : <LockKeyhole size={16} />}
-          <span>{snapshot?.isElevated ? "Administrator" : "Standard access"}</span>
+        <div className="sidebar-footer">
+          <button
+            aria-controls="primary-navigation"
+            aria-expanded={!sidebarCollapsed}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((current) => !current)}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            type="button"
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+          </button>
         </div>
       </aside>
 
@@ -516,7 +530,7 @@ function App() {
             )}
             <div className="transfer-actions" role="group" aria-label="Import and export">
               <button
-                className="secondary-button compact-button"
+                className="secondary-button"
                 disabled={loading || busy || !snapshot}
                 onClick={() => {
                   setActiveMenuKey(null);
@@ -528,7 +542,7 @@ function App() {
                 <FileUp size={15} /> Import
               </button>
               <button
-                className="secondary-button compact-button"
+                className="secondary-button"
                 disabled={loading || busy || !snapshot}
                 onClick={() => {
                   setActiveMenuKey(null);
@@ -598,6 +612,7 @@ function App() {
                 onMenuChange={setActiveMenuKey}
                 onOpen={openVariable}
                 onTransfer={transferVariable}
+                paginationKey={`${scope}:${query}`}
                 query={query}
                 variables={variables}
               />
@@ -665,21 +680,29 @@ function App() {
 }
 
 function BackupsView({ snapshot, busy, onRestore }: { snapshot: EnvironmentSnapshot; busy: boolean; onRestore: (backup: BackupSummary) => void }) {
+  const pagination = useTablePagination(snapshot.backups, "backups");
   return (
     <section className="content-section">
       <div className="backup-location"><DatabaseBackup size={17} /><span>{snapshot.backupDirectory}</span></div>
-      <div className="backup-table">
-        <div className="backup-header"><span>Created</span><span>Scope</span><span>Reason</span><span>Variables</span><span /></div>
-        {snapshot.backups.map((backup) => (
-          <div className="backup-row" key={backup.id}>
-            <span>{new Date(backup.createdAtMs).toLocaleString()}</span>
-            <span className={`scope-label ${backup.scope}`}>{backup.scope}</span>
-            <span>{backupReason(backup.reason)}</span>
-            <span>{backup.variableCount}</span>
-            <button className="secondary-button compact-button" disabled={busy} onClick={() => onRestore(backup)} type="button"><History size={15} /> Restore</button>
-          </div>
-        ))}
-        {snapshot.backups.length === 0 && <div className="table-empty">Backups appear automatically before each change</div>}
+      <div className="table-shell">
+        <div className="backup-table">
+          <div className="backup-header"><span>Created</span><span>Scope</span><span>Reason</span><span>Variables</span><span /></div>
+          {pagination.items.map((backup) => (
+            <div className="backup-row" key={backup.id}>
+              <span>{new Date(backup.createdAtMs).toLocaleString()}</span>
+              <span className={`scope-label ${backup.scope}`}>{backup.scope}</span>
+              <span>{backupReason(backup.reason)}</span>
+              <span>{backup.variableCount}</span>
+              <button className="secondary-button compact-button" disabled={busy} onClick={() => onRestore(backup)} type="button"><History size={15} /> Restore</button>
+            </div>
+          ))}
+          {snapshot.backups.length === 0 && <div className="table-empty">Backups appear automatically before each change</div>}
+        </div>
+        <TablePagination
+          {...pagination}
+          onPageChange={pagination.setPage}
+          onPageSizeChange={pagination.setPageSize}
+        />
       </div>
     </section>
   );

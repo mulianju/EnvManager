@@ -1190,8 +1190,19 @@ mod tests {
         TransferFileFormat, parse_import_bytes,
     };
     use std::collections::{HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
+    static TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_test_directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "env-manager-{label}-{}-{}",
+            std::process::id(),
+            TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     #[derive(Default)]
     struct MemoryState {
@@ -1323,14 +1334,7 @@ mod tests {
 
     fn service(elevated: bool) -> TestHarness {
         let state = Arc::new(Mutex::new(MemoryState::default()));
-        let directory = std::env::temp_dir().join(format!(
-            "env-manager-service-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory = unique_test_directory("service-test");
         let service = EnvironmentService::new(
             Box::new(MemoryStore {
                 state: state.clone(),
@@ -1426,14 +1430,7 @@ mod tests {
 
     impl TestFile {
         fn new(label: &str, extension: &str, bytes: &[u8]) -> Self {
-            let directory = std::env::temp_dir().join(format!(
-                "env-manager-service-file-{label}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let directory = unique_test_directory(&format!("service-file-{label}"));
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.join(format!("variables.{extension}"));
             std::fs::write(&path, bytes).unwrap();

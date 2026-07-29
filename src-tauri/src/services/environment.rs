@@ -1,8 +1,8 @@
 use crate::domain::environment::{
     EnvironmentScope, EnvironmentValidationError, EnvironmentValueType, EnvironmentVariable,
     EnvironmentVariableInput, TransferMode, TransferVariableInput, compare_variable_names,
-    duplicate_path_entry_indexes, is_path_variable, join_path_entries, parse_path_entries,
-    variable_names_equal,
+    duplicate_path_entry_indexes, is_path_variable, join_path_entries, normalize_path_entry,
+    parse_path_entries, variable_names_equal,
 };
 use crate::platform::{EnvironmentStore, EnvironmentStoreError};
 use crate::services::backup::{BackupDocument, BackupError, BackupStore, BackupSummary};
@@ -61,6 +61,12 @@ pub struct PathEntryStatus {
     pub expanded_value: String,
     pub exists: bool,
     pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserPathEntryMutation {
+    original: Option<EnvironmentVariable>,
+    applied: EnvironmentVariable,
 }
 
 #[derive(Debug)]
@@ -176,6 +182,123 @@ impl EnvironmentService {
             std::env::vars().collect(),
             crate::platform::launch_powershell,
         )
+    }
+
+    pub fn user_path_contains(&self, entry: &Path) -> Result<bool, EnvironmentServiceError> {
+        let variables = self.store.list(EnvironmentScope::User)?;
+        let expansion_variables = std::env::vars().collect::<Vec<_>>();
+        let expected = expanded_path_identity(&entry.to_string_lossy(), &expansion_variables);
+        Ok(variables
+            .iter()
+            .find(|variable| is_path_variable(&variable.name))
+            .is_some_and(|variable| {
+                parse_path_entries(&variable.value).iter().any(|existing| {
+                    expanded_path_identity(existing, &expansion_variables) == expected
+                })
+            }))
+    }
+
+    pub fn ensure_user_path_entry(&self, entry: &Path) -> Result<bool, EnvironmentServiceError> {
+        Ok(self.ensure_user_path_entry_transactional(entry)?.is_some())
+    }
+
+    pub(crate) fn ensure_user_path_entry_transactional(
+        &self,
+        entry: &Path,
+    ) -> Result<Option<UserPathEntryMutation>, EnvironmentServiceError> {
+        if !entry.is_absolute() {
+            return Err(EnvironmentServiceError::InvalidTransfer(
+                "The managed command directory must be an absolute path.".to_owned(),
+            ));
+        }
+        let variables = self.store.list(EnvironmentScope::User)?;
+        let existing = variables
+            .iter()
+            .find(|variable| is_path_variable(&variable.name));
+        let expansion_variables = std::env::vars().collect::<Vec<_>>();
+        let expected = expanded_path_identity(&entry.to_string_lossy(), &expansion_variables);
+        if existing.is_some_and(|variable| {
+            parse_path_entries(&variable.value)
+                .iter()
+                .any(|current| expanded_path_identity(current, &expansion_variables) == expected)
+        }) {
+            return Ok(None);
+        }
+
+        let value = match existing {
+            Some(variable) if variable.value.trim().is_empty() => entry.display().to_string(),
+            Some(variable) if variable.value.ends_with(';') => {
+                format!("{}{}", variable.value, entry.display())
+            }
+            Some(variable) => format!("{};{}", variable.value, entry.display()),
+            None => entry.display().to_string(),
+        };
+        let input = EnvironmentVariableInput {
+            original_name: existing.map(|variable| variable.name.clone()),
+            name: existing.map_or_else(|| "Path".to_owned(), |variable| variable.name.clone()),
+            value,
+            value_type: existing.map_or(EnvironmentValueType::ExpandableString, |variable| {
+                variable.value_type
+            }),
+            scope: EnvironmentScope::User,
+        };
+        let mutation = UserPathEntryMutation {
+            original: existing.cloned(),
+            applied: EnvironmentVariable {
+                name: input.name.clone(),
+                value: input.value.clone(),
+                value_type: input.value_type,
+                scope: input.scope,
+            },
+        };
+        self.set_variable(input)?;
+        Ok(Some(mutation))
+    }
+
+    pub(crate) fn rollback_user_path_entry(
+        &self,
+        mutation: UserPathEntryMutation,
+    ) -> Result<(), EnvironmentServiceError> {
+        let current = self.store.list(EnvironmentScope::User)?;
+        let current_path = current
+            .iter()
+            .find(|variable| is_path_variable(&variable.name));
+        if current_path != Some(&mutation.applied) {
+            return Err(EnvironmentServiceError::TransactionRollbackFailed(
+                "User Path changed after the Command Shim save started; it was not overwritten."
+                    .to_owned(),
+            ));
+        }
+        match mutation.original {
+            Some(original) => self.store.set(&EnvironmentVariableInput {
+                original_name: Some(mutation.applied.name),
+                name: original.name,
+                value: original.value,
+                value_type: original.value_type,
+                scope: EnvironmentScope::User,
+            })?,
+            None => self
+                .store
+                .delete(EnvironmentScope::User, &mutation.applied.name)?,
+        }
+        self.store.broadcast_change()?;
+        Ok(())
+    }
+
+    pub fn effective_path_entries(&self) -> Result<Vec<PathBuf>, EnvironmentServiceError> {
+        let user = self.store.list(EnvironmentScope::User)?;
+        let system = self.store.list(EnvironmentScope::System)?;
+        let environment =
+            compose_process_environment(&std::env::vars().collect::<Vec<_>>(), &user, &system);
+        Ok(environment
+            .iter()
+            .find(|(name, _)| is_path_variable(name))
+            .map_or_else(Vec::new, |(_, value)| {
+                parse_path_entries(value)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect()
+            }))
     }
 
     fn launch_powershell_with<F>(
@@ -1025,6 +1148,10 @@ fn expand_percent_variables(value: &str, variables: &[(String, String)]) -> Stri
     expanded
 }
 
+fn expanded_path_identity(entry: &str, variables: &[(String, String)]) -> String {
+    normalize_path_entry(&expand_percent_variables(entry, variables))
+}
+
 fn expand_percent_variables_once(value: &str, variables: &[(String, String)]) -> String {
     let bytes = value.as_bytes();
     let mut output = String::with_capacity(value.len());
@@ -1377,6 +1504,136 @@ mod tests {
             &preview.token,
             &preview.environment_revision,
         )
+    }
+
+    #[test]
+    fn ensure_user_path_entry_adds_once_and_preserves_existing_path_text() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![expandable_variable(
+                EnvironmentScope::User,
+                "PATH",
+                r"%USERPROFILE%\bin;C:\Tools\",
+            )],
+        );
+
+        assert!(
+            harness
+                .service
+                .ensure_user_path_entry(Path::new(r"C:\Users\me\AppData\Local\EnvManager\bin"))
+                .unwrap()
+        );
+        assert!(
+            harness
+                .service
+                .user_path_contains(Path::new(r"c:/users/me/appdata/local/envmanager/bin/"))
+                .unwrap()
+        );
+        assert!(
+            !harness
+                .service
+                .ensure_user_path_entry(Path::new(r"c:/users/me/appdata/local/envmanager/bin/"))
+                .unwrap()
+        );
+
+        let state = harness.state.lock().unwrap();
+        let path = state.variables[&EnvironmentScope::User]
+            .iter()
+            .find(|variable| is_path_variable(&variable.name))
+            .unwrap();
+        assert_eq!(
+            path.value,
+            r"%USERPROFILE%\bin;C:\Tools\;C:\Users\me\AppData\Local\EnvManager\bin"
+        );
+        assert_eq!(path.value_type, EnvironmentValueType::ExpandableString);
+        assert_eq!(state.set_calls, 1);
+        assert_eq!(state.broadcasts, 1);
+    }
+
+    #[test]
+    fn ensure_user_path_entry_rolls_back_when_broadcast_fails() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "Path", r"C:\Original")],
+        );
+        harness.state.lock().unwrap().fail_next_broadcast = true;
+
+        assert!(
+            harness
+                .service
+                .ensure_user_path_entry(Path::new(r"C:\Managed\bin"))
+                .is_err()
+        );
+        let state = harness.state.lock().unwrap();
+        let path = state.variables[&EnvironmentScope::User]
+            .iter()
+            .find(|variable| is_path_variable(&variable.name))
+            .unwrap();
+        assert_eq!(path.value, r"C:\Original");
+    }
+
+    #[test]
+    fn command_shim_path_mutation_can_be_rolled_back_after_a_later_failure() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "Path", r"C:\Original")],
+        );
+
+        let mutation = harness
+            .service
+            .ensure_user_path_entry_transactional(Path::new(r"C:\Managed\bin"))
+            .unwrap()
+            .unwrap();
+        harness.service.rollback_user_path_entry(mutation).unwrap();
+
+        let state = harness.state.lock().unwrap();
+        let path = state.variables[&EnvironmentScope::User]
+            .iter()
+            .find(|variable| is_path_variable(&variable.name))
+            .unwrap();
+        assert_eq!(path.value, r"C:\Original");
+        assert_eq!(state.broadcasts, 2);
+    }
+
+    #[test]
+    fn command_shim_path_rollback_does_not_overwrite_a_concurrent_change() {
+        let harness = service(false);
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(EnvironmentScope::User, "Path", r"C:\Original")],
+        );
+        let mutation = harness
+            .service
+            .ensure_user_path_entry_transactional(Path::new(r"C:\Managed\bin"))
+            .unwrap()
+            .unwrap();
+        seed(
+            &harness.state,
+            EnvironmentScope::User,
+            vec![variable(
+                EnvironmentScope::User,
+                "Path",
+                r"C:\Original;C:\Managed\bin;C:\External",
+            )],
+        );
+
+        assert!(matches!(
+            harness.service.rollback_user_path_entry(mutation),
+            Err(EnvironmentServiceError::TransactionRollbackFailed(_))
+        ));
+        let state = harness.state.lock().unwrap();
+        let path = state.variables[&EnvironmentScope::User]
+            .iter()
+            .find(|variable| is_path_variable(&variable.name))
+            .unwrap();
+        assert_eq!(path.value, r"C:\Original;C:\Managed\bin;C:\External");
     }
 
     #[test]

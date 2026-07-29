@@ -131,3 +131,36 @@ export interface ApiError {
   code: string;
   message: string;
 }
+
+export type CommandShimStatus =
+  | "ready"
+  | "missingExecutable"
+  | "missingTarget"
+  | "nameConflict"
+  | "externallyModified"
+  | "missingShim";
+
+export interface CommandShimInput {
+  id: string | null;
+  commandName: string;
+  executable: string;
+  fixedArguments: string[];
+}
+
+export interface CommandShim {
+  id: string;
+  commandName: string;
+  executable: string;
+  fixedArguments: string[];
+  shimPath: string;
+  status: CommandShimStatus;
+  statusMessage: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface CommandShimSnapshot {
+  items: CommandShim[];
+  managedDirectory: string;
+  pathReady: boolean;
+}

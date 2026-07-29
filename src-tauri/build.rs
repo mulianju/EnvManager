@@ -16,6 +16,9 @@ const COMMANDS: &[&str] = &[
     "toggle_favorite",
     "analyze_path_entries",
     "restart_elevated",
+    "get_command_shims",
+    "save_command_shim",
+    "delete_command_shim",
 ];
 
 fn main() {

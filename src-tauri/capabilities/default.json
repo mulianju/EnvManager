@@ -23,6 +23,9 @@
     "allow-get-favorites",
     "allow-toggle-favorite",
     "allow-analyze-path-entries",
-    "allow-restart-elevated"
+    "allow-restart-elevated",
+    "allow-get-command-shims",
+    "allow-save-command-shim",
+    "allow-delete-command-shim"
   ]
 }

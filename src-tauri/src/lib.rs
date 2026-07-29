@@ -6,6 +6,7 @@ pub mod platform;
 pub mod services;
 
 use crate::services::backup::BackupStore;
+use crate::services::command_shim::CommandShimStore;
 use crate::services::environment::EnvironmentService;
 use crate::services::settings::SettingsStore;
 
@@ -15,9 +16,12 @@ pub fn run() {
         .expect("the environment manager backup directory must be available");
     let settings = SettingsStore::from_default_location()
         .expect("the environment manager settings path must be available");
+    let command_shims = CommandShimStore::from_default_locations()
+        .expect("the environment manager Command Shim paths must be available");
     let app_state = api::AppState::new(
         EnvironmentService::new(platform::system_store(), backups),
         settings,
+        command_shims,
     );
 
     let builder = tauri::Builder::default()
@@ -41,6 +45,9 @@ pub fn run() {
             api::toggle_favorite,
             api::analyze_path_entries,
             api::restart_elevated,
+            api::get_command_shims,
+            api::save_command_shim,
+            api::delete_command_shim,
         ]);
 
     #[cfg(desktop)]

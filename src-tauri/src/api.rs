@@ -3,6 +3,9 @@ use crate::domain::environment::{
     variable_names_equal,
 };
 use crate::platform::{EnvironmentStoreError, restart_as_administrator};
+use crate::services::command_shim::{
+    CommandShimError, CommandShimInput, CommandShimSnapshot, CommandShimStore,
+};
 use crate::services::environment::{
     EnvironmentService, EnvironmentServiceError, EnvironmentSnapshot, MutationResult,
     PathEntryStatus,
@@ -60,16 +63,41 @@ impl From<SettingsError> for ApiError {
     }
 }
 
+impl From<CommandShimError> for ApiError {
+    fn from(error: CommandShimError) -> Self {
+        let code = match &error {
+            CommandShimError::InvalidCommandName(_) => "invalidCommandName",
+            CommandShimError::InvalidExecutable(_)
+            | CommandShimError::MissingExecutable(_)
+            | CommandShimError::InvalidFixedArgument(_)
+            | CommandShimError::MissingTarget(_) => "shimTargetMissing",
+            CommandShimError::DuplicateCommandName(_) | CommandShimError::NameConflict(_) => {
+                "shimConflict"
+            }
+            CommandShimError::ExternallyModified(_) => "shimExternallyModified",
+            CommandShimError::UnsupportedPlatform => "unsupportedPlatform",
+            _ => "shimOperationFailed",
+        };
+        Self::new(code, error)
+    }
+}
+
 pub struct AppState {
     service: Mutex<EnvironmentService>,
     settings: SettingsStore,
+    command_shims: CommandShimStore,
 }
 
 impl AppState {
-    pub fn new(service: EnvironmentService, settings: SettingsStore) -> Self {
+    pub fn new(
+        service: EnvironmentService,
+        settings: SettingsStore,
+        command_shims: CommandShimStore,
+    ) -> Self {
         Self {
             service: Mutex::new(service),
             settings,
+            command_shims,
         }
     }
 
@@ -246,6 +274,98 @@ pub fn restart_elevated(app: AppHandle) -> Result<(), ApiError> {
     restart_as_administrator().map_err(|error| ApiError::new("elevationFailed", error))?;
     app.exit(0);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_command_shims(state: State<'_, AppState>) -> Result<CommandShimSnapshot, ApiError> {
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        return Err(ApiError::from(CommandShimError::UnsupportedPlatform));
+    }
+    #[cfg(windows)]
+    {
+        state.command_shims.transaction(|| {
+            let service = lock_service(&state)?;
+            let path_ready = service
+                .user_path_contains(state.command_shims.managed_directory())
+                .map_err(ApiError::from)?;
+            let search_path = service.effective_path_entries().map_err(ApiError::from)?;
+            state
+                .command_shims
+                .snapshot_with_path(path_ready, &search_path)
+                .map_err(ApiError::from)
+        })
+    }
+}
+
+#[tauri::command]
+pub fn save_command_shim(
+    input: CommandShimInput,
+    state: State<'_, AppState>,
+) -> Result<CommandShimSnapshot, ApiError> {
+    #[cfg(not(windows))]
+    {
+        let _ = (input, state);
+        return Err(ApiError::from(CommandShimError::UnsupportedPlatform));
+    }
+    #[cfg(windows)]
+    {
+        state.command_shims.transaction(|| {
+            let service = lock_service(&state)?;
+            let search_path = service.effective_path_entries().map_err(ApiError::from)?;
+            state
+                .command_shims
+                .preflight_save(&input, &search_path)
+                .map_err(ApiError::from)?;
+            let path_mutation = service
+                .ensure_user_path_entry_transactional(state.command_shims.managed_directory())
+                .map_err(ApiError::from)?;
+            match state
+                .command_shims
+                .save_with_path(input, &search_path, true)
+            {
+                Ok(snapshot) => Ok(snapshot),
+                Err(error) => {
+                    if let Some(mutation) = path_mutation
+                        && let Err(rollback_error) = service.rollback_user_path_entry(mutation)
+                    {
+                        return Err(ApiError::new(
+                            "shimOperationFailed",
+                            format!("{error} User Path rollback also failed: {rollback_error}"),
+                        ));
+                    }
+                    Err(ApiError::from(error))
+                }
+            }
+        })
+    }
+}
+
+#[tauri::command]
+pub fn delete_command_shim(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<CommandShimSnapshot, ApiError> {
+    #[cfg(not(windows))]
+    {
+        let _ = (id, state);
+        return Err(ApiError::from(CommandShimError::UnsupportedPlatform));
+    }
+    #[cfg(windows)]
+    {
+        state.command_shims.transaction(|| {
+            let service = lock_service(&state)?;
+            let path_ready = service
+                .user_path_contains(state.command_shims.managed_directory())
+                .map_err(ApiError::from)?;
+            let search_path = service.effective_path_entries().map_err(ApiError::from)?;
+            state
+                .command_shims
+                .delete_with_path(&id, path_ready, &search_path)
+                .map_err(ApiError::from)
+        })
+    }
 }
 
 fn lock_service<'a>(

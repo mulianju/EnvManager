@@ -12,25 +12,25 @@
 | 来源链接 | 当前 Codex 会话 |
 | 优先级 | 待确认 |
 | 产品版本 | 待确认 |
-| 状态 | 分析中 |
+| 状态 | 已验证 |
 | 创建日期 | 2026-07-22 |
-| 最后更新 | 2026-07-22 |
+| 最后更新 | 2026-07-28 |
 
 ## 阶段文档引用
 
 | 阶段 | 文档 | 状态 | 更新时间 |
 |------|------|------|----------|
-| 需求分析 | [prd-command-shims.md](prd/prd-command-shims.md) | 待确认 | 2026-07-22 |
-| 技术方案 | `tech/tech-command-shims.md` | 待开始 | - |
-| 开发 | `dev/dev-command-shims.md` | 待开始 | - |
-| 测试 | `test/test-command-shims.md` | 待开始 | - |
+| 需求分析 | [prd-command-shims.md](prd/prd-command-shims.md) | 已确认 | 2026-07-28 |
+| 实施计划 | [plan.md](../../fe/deliverables/2026-07-28-command-shims/plan.md) | 已完成 | 2026-07-28 |
+| 开发 | 实现代码与提交 diff | 已完成 | 2026-07-28 |
+| 测试 | [test-command-shims.md](test/test-command-shims.md) | 已完成 | 2026-07-28 |
 | 上线 | `release/release-command-shims.md` | 待开始 | - |
 
 ## 当前进度
 
-- **当前阶段**：需求确认
-- **当前结论**：背景和目标已确认；能力边界、产品版本和部分交互细节待确认
-- **下一步行动**：确认首期是通用 Command Shim，还是仅支持 Node 脚本命令
+- **当前阶段**：发布准备
+- **当前结论**：首期采用通用 executable + fixed arguments、仅 User scope，同时生成 PowerShell/CMD 与 Git Bash wrapper
+- **下一步行动**：生成最终安装包并完成 GitHub 开源发布
 
 ## 原始输入与来源摘要
 
@@ -41,8 +41,8 @@
 示例目标：
 
 ```text
-sharedev -> C:\Users\mulia\scoop\apps\nodejs-lts\current\node.exe
-            D:\work\work\git\fe-paas\web-ide\packages\share-dev-cli\dist\sharedev.js
+sharedev -> C:\Tools\Node\node.exe
+            C:\Tools\sharedev\dist\sharedev.js
 ```
 
 ### 来源摘要
@@ -50,7 +50,7 @@ sharedev -> C:\Users\mulia\scoop\apps\nodejs-lts\current\node.exe
 | 来源类型 | 标识 | 摘要 | 是否已核对 |
 |----------|------|------|------------|
 | 用户沟通 | 当前会话 | 环境变量本身不能注册终端命令，需要 EnvManager 提供额外能力 | 是 |
-| 项目现状 | EnvManager | 当前产品管理 Windows User/System Registry 环境变量，尚无命令 Shim 管理能力 | 是 |
+| 项目现状 | EnvManager | Command Shims 已作为独立模块实现，不改变 Registry 环境变量语义 | 是 |
 
 ## 已确认信息表
 
@@ -66,17 +66,17 @@ sharedev -> C:\Users\mulia\scoop\apps\nodejs-lts\current\node.exe
 
 | 编号 | 优先级 | 类别 | 待确认问题 | 当前建议 | 风险 | 状态 |
 |------|--------|------|------------|----------|------|------|
-| T1 | P0 | 范围 | 首期仅支持 Node 脚本，还是支持任意“可执行文件 + 固定参数”的通用命令 Shim？ | 推荐通用 Shim，Node 脚本作为典型用例 | 高 | 待确认 |
-| T2 | P1 | 范围 | 首期是否只支持当前用户，还是同时支持系统级 Shim？ | 推荐仅 User scope | 中 | 待确认 |
-| T3 | P1 | 交互 | 是否需要从 EnvManager 内直接试运行命令？ | 推荐首期只做静态验证，不自动执行 | 中 | 待确认 |
+| T1 | P0 | 范围 | 首期仅支持 Node 脚本，还是支持任意“可执行文件 + 固定参数”的通用命令 Shim？ | 通用 Shim，Node 脚本作为典型用例 | 高 | 已确认 |
+| T2 | P1 | 范围 | 首期是否只支持当前用户，还是同时支持系统级 Shim？ | 仅 User scope | 中 | 已确认 |
+| T3 | P1 | 交互 | 是否需要从 EnvManager 内直接试运行命令？ | 首期只做静态验证，不自动执行 | 中 | 已确认 |
 | T4 | P1 | 版本 | 该能力进入哪个产品版本？ | 建议下一个 minor 版本 | 低 | 待确认 |
-| T5 | P2 | 范围 | 是否支持工作目录、额外环境变量等高级启动配置？ | 推荐首期不支持 | 中 | 待确认 |
+| T5 | P2 | 范围 | 是否支持工作目录、额外环境变量等高级启动配置？ | 首期不支持 | 中 | 已确认 |
 
 ## 阻塞项
 
 | 编号 | 阻塞说明 | 影响 | 解决方式 | 状态 |
 |------|----------|------|----------|------|
-| B1 | 未确认首期能力模型 | 无法定稿字段模型、校验规则和验收边界 | 用户确认 T1 | 未解决 |
+| B1 | 未确认首期能力模型 | 无法定稿字段模型、校验规则和验收边界 | 用户确认 T1 | 已解决 |
 
 ## 核心目标
 
@@ -88,10 +88,15 @@ sharedev -> C:\Users\mulia\scoop\apps\nodejs-lts\current\node.exe
 
 | 时间 | 决策项 | 决策 | 决策人 |
 |------|--------|------|--------|
-| 2026-07-22 | 能力归属 | 作为独立 Command Shims 功能，不伪装成环境变量 | 待用户确认 PRD |
+| 2026-07-22 | 能力归属 | 作为独立 Command Shims 功能，不伪装成环境变量 | 用户 / Codex |
+| 2026-07-28 | 首期范围 | 通用 executable + fixed arguments、User scope、无试运行/工作目录/额外环境变量 | 用户 |
+| 2026-07-28 | Shell 支持 | 同时生成 `.cmd` 与无扩展名 wrapper，覆盖 PowerShell/CMD 和 Git Bash | 用户 / Codex |
 
 ## 版本变更
 
 | 版本 | 日期 | 变更内容 | 变更人 |
 |------|------|----------|--------|
 | v0.1 | 2026-07-22 | 根据用户目标建立需求总控与 PRD 骨架 | Codex |
+| v0.2 | 2026-07-28 | 确认首期范围并进入开发 | Codex |
+| v0.3 | 2026-07-28 | 补充 Git Bash wrapper 与开源发布验收范围 | Codex |
+| v0.4 | 2026-07-28 | 完成全量验证并进入开源发布 | Codex |

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-command-shims"
+description = "Enables the get_command_shims command without any pre-configured scope."
+commands.allow = ["get_command_shims"]
+
+[[permission]]
+identifier = "deny-get-command-shims"
+description = "Denies the get_command_shims command without any pre-configured scope."
+commands.deny = ["get_command_shims"]

@@ -23,6 +23,7 @@ import {
   Undo2,
   User,
   Variable,
+  SquareTerminal,
   X,
 } from "lucide-react";
 import "./App.css";
@@ -31,18 +32,23 @@ import { PathEditor } from "./components/PathEditor";
 import { TablePagination, useTablePagination } from "./components/TablePagination";
 import { TransferDialog, type TransferDialogMode } from "./components/TransferDialog";
 import { EffectiveVariablesView, VariablesView } from "./components/VariableViews";
+import { CommandShimEditor } from "./components/CommandShimEditor";
+import { CommandShimsView } from "./components/CommandShimsView";
 import {
   apiErrorCode,
   apiErrorMessage,
   copyText,
+  deleteCommandShim,
   deleteEnvironmentVariable,
   desktopErrorMessage,
   getEnvironmentRevision,
   getEnvironmentSnapshot,
   getFavorites,
+  getCommandShims,
   restartElevated,
   restoreEnvironmentBackup,
   saveEnvironmentVariable,
+  saveCommandShim,
   toggleFavorite,
   transferEnvironmentVariable,
   undoEnvironmentMutation,
@@ -64,9 +70,13 @@ import {
   shouldApplyGeneration,
   transferConfirmationMessage,
 } from "./lib/environment";
+import { emptyCommandShimInput, filterCommandShims } from "./lib/command-shims";
 import type {
   ApiError,
   BackupSummary,
+  CommandShim,
+  CommandShimInput,
+  CommandShimSnapshot,
   EnvironmentScope,
   EnvironmentSnapshot,
   EnvironmentVariable,
@@ -77,7 +87,7 @@ import type {
   VariableCopyFormat,
 } from "./types";
 
-type View = EnvironmentScope | "effective" | "backups";
+type View = EnvironmentScope | "effective" | "commandShims" | "backups";
 interface NoticeState {
   message: string;
   undoBackupIds?: string[];
@@ -92,6 +102,7 @@ const navigation: Array<{ id: View; label: string; icon: typeof User }> = [
   { id: "user", label: "User variables", icon: User },
   { id: "system", label: "System variables", icon: Shield },
   { id: "effective", label: "Effective", icon: Variable },
+  { id: "commandShims", label: "Command Shims", icon: SquareTerminal },
   { id: "backups", label: "Backups", icon: History },
 ];
 
@@ -100,8 +111,12 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [snapshot, setSnapshot] = useState<EnvironmentSnapshot | null>(null);
   const [favorites, setFavorites] = useState<FavoriteKey[]>([]);
+  const [commandShimSnapshot, setCommandShimSnapshot] = useState<CommandShimSnapshot | null>(null);
+  const [commandShimLoading, setCommandShimLoading] = useState(true);
+  const [commandShimError, setCommandShimError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<EditorSession | null>(null);
+  const [commandShimEditor, setCommandShimEditor] = useState<CommandShimInput | null>(null);
   const [transferMode, setTransferMode] = useState<TransferDialogMode | null>(null);
   const [activeMenuKey, setActiveMenuKey] = useState<string | null>(null);
   const [deferredRevision, setDeferredRevision] = useState<string | null>(null);
@@ -110,6 +125,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const requestId = useRef(0);
+  const commandShimRequestId = useRef(0);
   const favoriteGeneration = useRef(0);
   const importButtonRef = useRef<HTMLButtonElement | null>(null);
   const exportButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -128,9 +144,27 @@ function App() {
     setError(null);
     try {
       const next = await getEnvironmentSnapshot();
-      if (requestId.current === currentRequest) {
-        commitSnapshot(next);
-        setDeferredRevision(null);
+      if (requestId.current !== currentRequest) return;
+      commitSnapshot(next);
+      setDeferredRevision(null);
+      const currentCommandShimRequest = ++commandShimRequestId.current;
+      setCommandShimLoading(true);
+      try {
+        const nextCommandShims = await getCommandShims();
+        if (commandShimRequestId.current === currentCommandShimRequest) {
+          setCommandShimSnapshot(nextCommandShims);
+          setCommandShimError(null);
+        }
+      } catch (commandShimError) {
+        if (commandShimRequestId.current === currentCommandShimRequest) {
+          const message = apiErrorMessage(commandShimError);
+          setCommandShimError(message);
+          setError(`Environment loaded, but Command Shims could not be read: ${message}`);
+        }
+      } finally {
+        if (commandShimRequestId.current === currentCommandShimRequest) {
+          setCommandShimLoading(false);
+        }
       }
       const favoritesRequest = ++favoriteGeneration.current;
       try {
@@ -172,7 +206,7 @@ function App() {
     };
   }, []);
 
-  const interactionOpen = Boolean(editor || activeMenuKey || transferMode);
+  const interactionOpen = Boolean(editor || commandShimEditor || activeMenuKey || transferMode);
 
   const closeTransferDialog = () => {
     const trigger = transferMode === "import"
@@ -263,6 +297,10 @@ function App() {
   const effectiveVariables = useMemo(
     () => filterEffectiveVariables(snapshot?.effectiveVariables ?? [], query),
     [snapshot, query],
+  );
+  const commandShims = useMemo(
+    () => filterCommandShims(commandShimSnapshot?.items ?? [], query),
+    [commandShimSnapshot, query],
   );
 
   const reconcileFavorites = async () => {
@@ -362,6 +400,40 @@ function App() {
     }
   };
 
+  const openCommandShim = (item: CommandShim) => {
+    setCommandShimEditor({
+      id: item.id,
+      commandName: item.commandName,
+      executable: item.executable,
+      fixedArguments: [...item.fixedArguments],
+    });
+  };
+
+  const saveEditedCommandShim = async (input: CommandShimInput) => {
+    const next = await perform(() => saveCommandShim(input));
+    if (!next) return;
+    setCommandShimSnapshot(next);
+    setCommandShimEditor(null);
+    setNotice({
+      message: input.id
+        ? `${input.commandName.trim()} updated. Open a new terminal if PATH changed.`
+        : `${input.commandName.trim()} created. Open a new terminal to use it.`,
+    });
+  };
+
+  const deleteEditedCommandShim = async (input: CommandShimInput) => {
+    if (!input.id) {
+      setCommandShimEditor(null);
+      return;
+    }
+    if (!window.confirm(`Delete the ${input.commandName} Command Shim? The target files will not be removed.`)) return;
+    const next = await perform(() => deleteCommandShim(input.id!));
+    if (!next) return;
+    setCommandShimSnapshot(next);
+    setCommandShimEditor(null);
+    setNotice({ message: `${input.commandName} deleted. Its executable and fixed argument files were not changed.` });
+  };
+
   const undoMutation = async (backupIds: string[], expectedRevision: string) => {
     const next = await perform(() =>
       undoEnvironmentMutation(backupIds, expectedRevision),
@@ -450,6 +522,7 @@ function App() {
       );
       if (!confirmed) return;
       setEditor(null);
+      setCommandShimEditor(null);
       setActiveMenuKey(null);
     }
     await refresh();
@@ -477,7 +550,9 @@ function App() {
                   ? snapshot.systemVariables.length
                   : item.id === "effective"
                     ? snapshot.effectiveVariables.length
-                    : snapshot.backups.length
+                    : item.id === "commandShims"
+                      ? commandShimSnapshot?.items.length ?? 0
+                      : snapshot.backups.length
               : 0;
             return (
               <button
@@ -525,10 +600,10 @@ function App() {
             {view !== "backups" && (
               <label className="search-control">
                 <Search size={16} />
-                <input aria-label="Search variables" placeholder="Search" value={query} onChange={(event) => setQuery(event.target.value)} />
+                <input aria-label={view === "commandShims" ? "Search Command Shims" : "Search variables"} placeholder="Search" value={query} onChange={(event) => setQuery(event.target.value)} />
               </label>
             )}
-            <div className="transfer-actions" role="group" aria-label="Import and export">
+            {view !== "commandShims" && <div className="transfer-actions" role="group" aria-label="Import and export">
               <button
                 className="secondary-button"
                 disabled={loading || busy || !snapshot}
@@ -553,13 +628,18 @@ function App() {
               >
                 <FileDown size={15} /> Export
               </button>
-            </div>
+            </div>}
             <button className="icon-button" disabled={loading || busy} onClick={() => void requestRefresh()} title="Refresh" type="button">
               <RefreshCw className={loading ? "spin" : ""} size={17} />
             </button>
             {scope && (
               <button className="primary-button" disabled={scope === "system" && !snapshot?.isElevated} onClick={addVariable} type="button">
                 <Plus size={16} /> Add variable
+              </button>
+            )}
+            {view === "commandShims" && (
+              <button className="primary-button" disabled={busy || !commandShimSnapshot} onClick={() => setCommandShimEditor(emptyCommandShimInput())} type="button">
+                <Plus size={16} /> Add command
               </button>
             )}
           </div>
@@ -623,6 +703,27 @@ function App() {
                 query={query}
                 variables={effectiveVariables}
               />
+            ) : view === "commandShims" ? (
+              commandShimSnapshot ? (
+                <CommandShimsView
+                  busy={busy}
+                  items={commandShims}
+                  onEdit={openCommandShim}
+                  query={query}
+                  snapshot={commandShimSnapshot}
+                />
+              ) : commandShimLoading ? (
+                <div className="loading-state"><LoaderCircle className="spin" size={24} /> Loading Command Shims</div>
+              ) : (
+                <div className="loading-state error-state" role="alert">
+                  <AlertCircle size={24} />
+                  <strong>Command Shims could not be loaded</strong>
+                  <span>{commandShimError}</span>
+                  <button className="secondary-button" onClick={() => void requestRefresh()} type="button">
+                    <RefreshCw size={15} /> Retry
+                  </button>
+                </div>
+              )
             ) : (
               <BackupsView
                 busy={busy}
@@ -657,6 +758,16 @@ function App() {
           onDelete={() => void deleteVariable(editor.input, editor.expectedRevision)}
           onError={setError}
           onSave={(input) => void saveVariable(input, editor.expectedRevision)}
+        />
+      )}
+      {commandShimEditor && (
+        <CommandShimEditor
+          busy={busy}
+          input={commandShimEditor}
+          onClose={() => setCommandShimEditor(null)}
+          onDelete={() => void deleteEditedCommandShim(commandShimEditor)}
+          onError={setError}
+          onSave={(input) => void saveEditedCommandShim(input)}
         />
       )}
       {transferMode && snapshot && (
@@ -814,11 +925,11 @@ function isFavorite(
 }
 
 function viewTitle(view: View): string {
-  return { user: "User variables", system: "System variables", effective: "Effective environment", backups: "Backups" }[view];
+  return { user: "User variables", system: "System variables", effective: "Effective environment", commandShims: "Command Shims", backups: "Backups" }[view];
 }
 
 function viewSubtitle(view: View): string {
-  return { user: "HKCU\\Environment", system: "HKLM\\...\\Session Manager\\Environment", effective: "Environment inherited by newly launched processes", backups: "Automatic restore points" }[view];
+  return { user: "HKCU\\Environment", system: "HKLM\\...\\Session Manager\\Environment", effective: "Environment inherited by newly launched processes", commandShims: "User commands backed by managed .cmd files", backups: "Automatic restore points" }[view];
 }
 
 function backupReason(reason: string): string {

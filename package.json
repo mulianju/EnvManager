@@ -2,6 +2,7 @@
   "name": "env-manager",
   "private": true,
   "version": "0.2.0",
+  "license": "MIT",
   "packageManager": "pnpm@10.33.0",
   "type": "module",
   "engines": {

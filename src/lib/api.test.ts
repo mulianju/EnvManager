@@ -4,6 +4,7 @@ import type {
   EnvironmentSnapshot,
   EnvironmentVariableInput,
   ImportFileRequest,
+  CommandShimInput,
 } from "../types";
 
 interface MutationResultContract {
@@ -211,6 +212,51 @@ describe("browser preview API contracts", () => {
     });
     expect(api.apiErrorCode({ code: "variableAlreadyExists", message: "collision" }))
       .toBe("variableAlreadyExists");
+  });
+
+  it("creates, edits, and deletes Command Shims in browser preview", async () => {
+    const api = await loadPreviewApi();
+    const created = await api.saveCommandShim({
+      id: null,
+      commandName: "local-tool",
+      executable: "C:\\Runtime\\runtime.exe",
+      fixedArguments: ["D:\\tools\\tool.js"],
+    });
+    const item = created.items.find((entry) => entry.commandName === "local-tool");
+    expect(item).toMatchObject({ status: "ready", fixedArguments: ["D:\\tools\\tool.js"] });
+
+    const edited = await api.saveCommandShim({
+      id: item!.id,
+      commandName: "local-tool-next",
+      executable: "C:\\Runtime\\runtime.exe",
+      fixedArguments: ["--version"],
+    });
+    expect(edited.items.some((entry) => entry.commandName === "local-tool")).toBe(false);
+    expect(edited.items.some((entry) => entry.commandName === "local-tool-next")).toBe(true);
+
+    const deleted = await api.deleteCommandShim(item!.id);
+    expect(deleted.items.some((entry) => entry.id === item!.id)).toBe(false);
+  });
+
+  it("passes Command Shim payloads through typed Tauri commands", async () => {
+    const invoke = vi.fn().mockResolvedValue({});
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const api = await import("./api");
+    const input: CommandShimInput = {
+      id: null,
+      commandName: "sharedev",
+      executable: "C:\\Node\\node.exe",
+      fixedArguments: ["D:\\sharedev.js"],
+    };
+
+    await api.getCommandShims();
+    await api.saveCommandShim(input);
+    await api.deleteCommandShim("shim-id");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "get_command_shims");
+    expect(invoke).toHaveBeenNthCalledWith(2, "save_command_shim", { input });
+    expect(invoke).toHaveBeenNthCalledWith(3, "delete_command_shim", { id: "shim-id" });
   });
 
   it("opens the native folder picker with a single-directory payload and preserves cancellation", async () => {

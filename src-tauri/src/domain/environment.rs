@@ -188,7 +188,7 @@ pub fn duplicate_path_entry_indexes(entries: &[String]) -> Vec<usize> {
     duplicates
 }
 
-fn normalize_path_entry(entry: &str) -> String {
+pub(crate) fn normalize_path_entry(entry: &str) -> String {
     let mut normalized = entry
         .trim()
         .trim_matches('"')

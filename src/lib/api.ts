@@ -3,6 +3,8 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   ApiError,
+  CommandShimInput,
+  CommandShimSnapshot,
   EnvironmentScope,
   EnvironmentSnapshot,
   EnvironmentVariable,
@@ -29,6 +31,24 @@ const browserPreview = typeof window !== "undefined" && !("__TAURI_INTERNALS__" 
 
 let previewRevision = 0;
 let previewFavorites: FavoriteKey[] = [];
+let previewCommandShimId = 1;
+let previewCommandShims: CommandShimSnapshot = {
+  items: [
+    {
+      id: "preview-sharedev",
+      commandName: "sharedev",
+      executable: "C:\\Tools\\Node\\node.exe",
+      fixedArguments: ["C:\\Tools\\sharedev\\dist\\sharedev.js"],
+      shimPath: "C:\\Users\\Developer\\AppData\\Local\\EnvManager\\bin\\sharedev.cmd",
+      status: "ready",
+      statusMessage: null,
+      createdAtMs: Date.now() - 86_400_000,
+      updatedAtMs: Date.now() - 3_600_000,
+    },
+  ],
+  managedDirectory: "C:\\Users\\Developer\\AppData\\Local\\EnvManager\\bin",
+  pathReady: true,
+};
 let previewSnapshot: EnvironmentSnapshot = {
   userVariables: [
     {
@@ -76,6 +96,59 @@ refreshPreviewDerivedState();
 export async function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
   if (browserPreview) return structuredClone(previewSnapshot);
   return invoke<EnvironmentSnapshot>("get_environment_snapshot");
+}
+
+export async function getCommandShims(): Promise<CommandShimSnapshot> {
+  if (browserPreview) return structuredClone(previewCommandShims);
+  return invoke<CommandShimSnapshot>("get_command_shims");
+}
+
+export async function saveCommandShim(
+  input: CommandShimInput,
+): Promise<CommandShimSnapshot> {
+  if (browserPreview) {
+    const commandName = input.commandName.trim();
+    if (!commandName) throw previewError("invalidCommandName", "A command name is required.");
+    if (!input.executable) throw previewError("shimTargetMissing", "Select an executable.");
+    const duplicate = previewCommandShims.items.find(
+      (item) => item.id !== input.id && item.commandName.toLowerCase() === commandName.toLowerCase(),
+    );
+    if (duplicate) throw previewError("shimConflict", `${duplicate.commandName} already exists.`);
+    const existing = input.id
+      ? previewCommandShims.items.find((item) => item.id === input.id)
+      : null;
+    if (input.id && !existing) throw previewError("shimOperationFailed", "Command Shim was not found.");
+    const now = Date.now();
+    const next = {
+      id: existing?.id ?? `preview-shim-${previewCommandShimId++}`,
+      commandName,
+      executable: input.executable,
+      fixedArguments: [...input.fixedArguments],
+      shimPath: `${previewCommandShims.managedDirectory}\\${commandName}.cmd`,
+      status: "ready" as const,
+      statusMessage: null,
+      createdAtMs: existing?.createdAtMs ?? now,
+      updatedAtMs: now,
+    };
+    previewCommandShims.items = previewCommandShims.items
+      .filter((item) => item.id !== next.id)
+      .concat(next)
+      .sort((left, right) => left.commandName.localeCompare(right.commandName));
+    previewCommandShims.pathReady = true;
+    return structuredClone(previewCommandShims);
+  }
+  return invoke<CommandShimSnapshot>("save_command_shim", { input });
+}
+
+export async function deleteCommandShim(id: string): Promise<CommandShimSnapshot> {
+  if (browserPreview) {
+    if (!previewCommandShims.items.some((item) => item.id === id)) {
+      throw previewError("shimOperationFailed", "Command Shim was not found.");
+    }
+    previewCommandShims.items = previewCommandShims.items.filter((item) => item.id !== id);
+    return structuredClone(previewCommandShims);
+  }
+  return invoke<CommandShimSnapshot>("delete_command_shim", { id });
 }
 
 export async function saveEnvironmentVariable(
@@ -325,6 +398,21 @@ export async function toggleFavorite(favorite: FavoriteKey): Promise<FavoriteKey
 export async function pickEnvironmentFolder(): Promise<string | null> {
   if (browserPreview) return null;
   const selected = await open({ directory: true, multiple: false });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function pickCommandShimExecutable(): Promise<string | null> {
+  if (browserPreview) return null;
+  const selected = await open({
+    multiple: false,
+    filters: [{ name: "Executable files", extensions: ["exe", "com"] }],
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function pickCommandShimArgument(): Promise<string | null> {
+  if (browserPreview) return null;
+  const selected = await open({ multiple: false });
   return typeof selected === "string" ? selected : null;
 }
 

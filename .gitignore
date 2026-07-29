@@ -12,6 +12,16 @@ dist
 dist-ssr
 *.local
 
+# Local environment data and exports
+.env
+.env.*
+!.env.example
+*.reg
+envmanager-exports/
+envmanager-backups/
+envmanager-export*.json
+envmanager-backup*.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

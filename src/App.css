@@ -40,6 +40,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .icon-button { width: 36px; height: 36px; padding: 0; display: inline-grid; place-items: center; border: 1px solid #cbd4da; border-radius: 6px; color: #46535d; background: #fff; }
 .icon-button:hover { border-color: #95a3ad; background: #fafbfc; }
 .icon-button.small { width: 30px; height: 30px; }
+.icon-only-button { width: 36px; padding: 0; }
 .danger-icon { color: #ad3434; }
 .primary-button, .secondary-button, .danger-button { min-height: 36px; padding: 0 13px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid transparent; border-radius: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; }
 .primary-button { color: #fff; background: #19724f; }
@@ -59,6 +60,8 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .refresh-message { color: #675118; border-color: #dccb91; background: #fffbed; }
 .loading-state, .empty-state { min-height: 0; display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #697680; }
 .empty-state strong { color: #37434d; }
+.error-state { color: #8f2929; text-align: center; }
+.error-state span { max-width: 560px; overflow-wrap: anywhere; color: #697680; }
 
 .permission-banner { margin-top: 18px; padding: 13px 14px; display: grid; flex: none; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 10px; border: 1px solid #e0cda8; border-radius: 6px; color: #7d5619; background: #fffaf0; }
 .permission-banner div { display: grid; gap: 3px; }
@@ -68,7 +71,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .table-summary { min-height: 32px; display: flex; flex: none; justify-content: space-between; color: #6d7983; font-size: 12px; }
 .table-summary span { min-width: 0; overflow-wrap: anywhere; }
 .table-shell { min-height: 0; display: grid; flex: 1; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #d7dde2; border-radius: 6px; background: #fff; }
-.variable-table, .backup-table { min-height: 0; overflow: auto; background: #fff; scrollbar-color: #b1bbc2 transparent; scrollbar-width: thin; }
+.variable-table, .backup-table, .command-shim-table { min-height: 0; overflow: auto; background: #fff; scrollbar-color: #b1bbc2 transparent; scrollbar-width: thin; }
 .variable-table.menu-open { padding-bottom: 190px; }
 .variable-header, .variable-row { display: grid; grid-template-columns: minmax(170px, 0.8fr) minmax(260px, 2fr) 110px 80px; align-items: center; gap: 12px; }
 .variable-header, .backup-header { position: sticky; z-index: 2; top: 0; min-height: 36px; padding: 0 12px; color: #687580; background: #eef1f3; font-size: 11px; font-weight: 700; text-transform: uppercase; }
@@ -108,10 +111,34 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .scope-label { width: fit-content; padding: 3px 7px; border-radius: 4px; color: #365f87; background: #e9f2fa; text-transform: capitalize; }
 .scope-label.system { color: #76561f; background: #f7eedc; }
 
+.command-shims-section { gap: 12px; }
+.shim-directory { min-height: 44px; padding: 7px 10px; display: grid; flex: none; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 9px; border: 1px solid #d7dde2; border-radius: 6px; background: #fff; }
+.shim-directory.ready { color: #23805c; }
+.shim-directory.warning { color: #9b6425; border-color: #e0cda8; background: #fffaf0; }
+.shim-directory div { min-width: 0; display: grid; gap: 2px; }
+.shim-directory code { min-width: 0; overflow: hidden; color: #3f4d57; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.shim-directory span { color: #77838c; font-size: 10px; }
+.command-shim-header, .command-shim-row { min-width: 860px; display: grid; grid-template-columns: minmax(140px, 0.7fr) minmax(220px, 1.35fr) minmax(200px, 1.15fr) 142px 34px; align-items: center; gap: 12px; }
+.command-shim-header { position: sticky; z-index: 2; top: 0; min-height: 36px; padding: 0 12px; color: #687580; background: #eef1f3; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.command-shim-row { min-height: 58px; padding: 8px 12px; border-top: 1px solid #e2e7ea; font-size: 12px; }
+.command-shim-row > * { min-width: 0; }
+.command-shim-row > code { overflow: hidden; color: #4d5963; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.shim-command { min-width: 0; display: flex; align-items: center; gap: 7px; color: #287258; }
+.shim-command strong { overflow: hidden; color: #28353e; text-overflow: ellipsis; white-space: nowrap; }
+.shim-arguments { min-width: 0; display: flex; gap: 4px; overflow: hidden; }
+.shim-arguments code { max-width: 150px; padding: 3px 5px; overflow: hidden; border: 1px solid #dbe2e6; border-radius: 4px; color: #58656f; background: #f7f9fa; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.shim-arguments span { color: #89949d; }
+.shim-status { width: fit-content; max-width: 100%; padding: 4px 7px; overflow: hidden; border-radius: 4px; font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.shim-status.ready { color: #176247; background: #e5f4ed; }
+.shim-status.missingExecutable, .shim-status.missingTarget, .shim-status.missingShim { color: #8b571f; background: #fff0df; }
+.shim-status.nameConflict { color: #785416; background: #f7efd9; }
+.shim-status.externallyModified { color: #922f2f; background: #fae8e8; }
+
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; padding: 24px; display: grid; place-items: center; background: rgba(21, 27, 33, 0.5); }
 .editor-modal { width: min(620px, 100%); max-height: calc(100vh - 48px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #cbd3d9; border-radius: 7px; background: #fff; box-shadow: 0 18px 44px rgba(15, 22, 28, 0.24); }
 .editor-modal.path-modal { width: min(920px, 100%); }
 .editor-modal.transfer-modal { width: min(980px, 100%); }
+.editor-modal.command-shim-modal { width: min(760px, 100%); }
 .modal-header { min-height: 70px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dfe4e7; }
 .modal-header h2 { margin: 0; font-size: 17px; letter-spacing: 0; }
 .modal-header span { display: block; margin-top: 4px; color: #74808a; font-size: 12px; text-transform: capitalize; }
@@ -124,6 +151,25 @@ input, select { height: 36px; padding: 0 10px; }
 textarea { padding: 9px 10px; resize: vertical; line-height: 1.45; }
 .secret-masked { -webkit-text-security: disc; }
 input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0 0 0 2px #dcefe7; }
+
+.command-shim-editor-body { display: grid; align-content: start; gap: 16px; }
+.shim-path-input { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 36px; gap: 7px; }
+.shim-path-input input, .shim-argument-row input { min-width: 0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.shim-argument-editor { min-width: 0; border-top: 1px solid #dfe4e7; }
+.shim-argument-editor > header { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.shim-argument-editor > header > div { display: flex; align-items: center; gap: 7px; }
+.shim-argument-editor > header strong { font-size: 13px; }
+.shim-argument-editor > header span { min-width: 20px; padding: 2px 5px; border-radius: 4px; color: #65727c; background: #edf1f3; font-size: 10px; text-align: center; }
+.shim-argument-list { display: grid; overflow: hidden; border: 1px solid #d7dde2; border-radius: 6px; }
+.shim-argument-row { min-width: 0; min-height: 50px; padding: 6px 7px; display: grid; grid-template-columns: 24px minmax(0, 1fr) 30px 30px; align-items: center; gap: 6px; border-top: 1px solid #e2e7ea; }
+.shim-argument-row:first-child { border-top: 0; }
+.shim-argument-row > span { color: #7c8790; font-size: 10px; text-align: center; }
+.shim-argument-empty { min-height: 64px; display: grid; place-items: center; color: #89949d; font-size: 11px; }
+.command-preview { min-width: 0; padding: 11px 12px; display: grid; gap: 8px; border-left: 3px solid #4f9c7e; background: #f3f7f5; }
+.command-preview > strong { color: #43515b; font-size: 11px; text-transform: uppercase; }
+.command-preview > div { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+.command-preview code { max-width: 100%; padding: 4px 6px; overflow: hidden; border: 1px solid #d6e1dc; border-radius: 4px; color: #34443d; background: #fff; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.command-preview code.runtimeArguments { color: #687580; border-style: dashed; background: transparent; }
 
 .transfer-body { display: grid; align-content: start; gap: 16px; }
 .transfer-file-row { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; }
@@ -227,9 +273,13 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
 
 @media (max-width: 860px) {
   .workspace { padding: 0 16px 14px; }
+  .topbar { min-height: 102px; padding: 10px 0; align-items: flex-start; flex-direction: column; justify-content: center; gap: 9px; }
+  .topbar-actions { width: 100%; }
+  .search-control { min-width: 0; flex: 1; }
   .variable-header, .variable-row { grid-template-columns: minmax(140px, 0.8fr) minmax(200px, 1.5fr) 80px 72px; }
   .effective-header, .effective-row { grid-template-columns: minmax(140px, 0.8fr) minmax(200px, 1.5fr) 110px 136px; }
   .backup-header, .backup-row { grid-template-columns: 150px 70px minmax(120px, 1fr) 70px 100px; }
+  .command-shim-header, .command-shim-row { min-width: 760px; grid-template-columns: minmax(130px, 0.7fr) minmax(200px, 1.25fr) minmax(180px, 1fr) 132px 34px; }
   .import-preview-header { display: none; }
   .import-preview-row { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
   .import-preview-row > div, .import-preview-row > div:first-child { display: grid; grid-template-columns: 1fr; gap: 3px; }
@@ -244,7 +294,7 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
   .search-control { width: 100%; }
   .permission-banner { grid-template-columns: 24px minmax(0, 1fr); }
   .permission-banner button { grid-column: 1 / -1; }
-  .variable-header, .backup-header { display: none; }
+  .variable-header, .backup-header, .command-shim-header { display: none; }
   .variable-row { grid-template-columns: minmax(0, 1fr) 72px; gap: 6px; }
   .variable-row .value-preview, .variable-row .type-label { grid-column: 1; }
   .effective-row { grid-template-columns: minmax(0, 1fr); align-items: start; }
@@ -255,8 +305,11 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
   .backup-row { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
   .backup-row > *:not(button) { grid-column: 1; }
   .backup-row button { grid-column: 2; grid-row: 1; }
+  .command-shim-row { min-width: 0; grid-template-columns: minmax(0, 1fr) 34px; align-items: start; gap: 7px; }
+  .command-shim-row > code, .command-shim-row .shim-arguments, .command-shim-row .shim-status { grid-column: 1; }
+  .command-shim-row > button { grid-column: 2; grid-row: 1; }
   .modal-backdrop { padding: 0; align-items: end; }
-  .editor-modal, .editor-modal.path-modal, .editor-modal.transfer-modal { width: 100%; max-height: 94vh; border-radius: 7px 7px 0 0; }
+  .editor-modal, .editor-modal.path-modal, .editor-modal.transfer-modal, .editor-modal.command-shim-modal { width: 100%; max-height: 94vh; border-radius: 7px 7px 0 0; }
   .form-grid { grid-template-columns: 1fr; }
   .transfer-actions { flex: 1; }
   .transfer-actions button { flex: 1; }
@@ -277,6 +330,8 @@ input:focus, select:focus, textarea:focus { border-color: #318765; box-shadow: 0
   .path-row { grid-template-columns: 20px 24px minmax(0, 1fr) 22px; }
   .path-actions { grid-column: 3 / -1; justify-content: flex-end; }
   .path-change-groups { grid-template-columns: 1fr; }
+  .shim-argument-editor > header { padding: 10px 0; align-items: stretch; flex-direction: column; }
+  .shim-argument-editor > header button { width: 100%; }
   .modal-footer { align-items: stretch; flex-direction: column-reverse; }
   .modal-footer > div, .modal-footer button { width: 100%; }
 }

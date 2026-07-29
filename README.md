@@ -60,6 +60,29 @@ System scope 的导入、编辑、删除、移动和恢复都遵循同一 UAC �
 
 **New PowerShell** 会重新读取 User/System Registry、按 Windows 顺序组合 PATH、有限递归展开 `%NAME%`，并为子进程显式设置最新环境，因此不依赖 EnvManager 自身启动时继承的旧环境。
 
+## Command Shims
+
+Command Shims 用短命令绑定指定的 Windows `.exe` / `.com` 可执行文件和固定参数。例如，把 `toolx` 配置为：
+
+```text
+Executable:      C:\Tools\Node\node.exe
+Fixed argument: C:\Tools\toolx\dist\cli.js
+```
+
+在新终端执行 `toolx --help` 时，EnvManager 会直接启动上述 `node.exe`，先传入固定的脚本路径，再转发 `--help`。它不会使用当前 `PATH` 中的默认 Node.js，也不会执行任意 shell 字符串。
+
+脚本文件不能直接作为 executable。需要选择对应运行时（例如 `node.exe`、`python.exe` 或 `powershell.exe`），再把脚本绝对路径作为第一个 fixed argument。
+
+首次保存 Command Shim 时，EnvManager 会把以下目录幂等加入 User `PATH`：
+
+```text
+%LOCALAPPDATA%\EnvManager\bin
+```
+
+每个命令同时生成 `<command>.cmd` 和无扩展名的 `<command>` wrapper，分别供 PowerShell/CMD 和 Git Bash 使用。已打开的终端不会自动获得新 `PATH`，保存后需要重新打开终端。旧版本创建的命令若缺少 Git Bash wrapper，在编辑器中重新保存一次即可补齐。
+
+配置元数据位于 `%APPDATA%\EnvManager\command-shims.json`。EnvManager 只更新或删除所有权标识及内容校验均匹配的文件；外部同名文件或被手工修改的 wrapper 会被保留并报告冲突。
+
 ## 权限与平台边界
 
 - UI 提供 **Restart as administrator**，通过 Windows UAC 重新启动当前应用。
@@ -81,6 +104,10 @@ pnpm tauri dev
 
 `pnpm tauri dev` 启动桌面端并读取真实 Registry。`pnpm dev` 仅启动浏览器预览，使用内存示例数据，不读取或修改 Registry，也不能验证原生文件选择器、托盘、QuickPanel、UAC 或 PowerShell 启动。
 
+运行时环境变量、备份、收藏设置和 Command Shim 配置都保存在 Windows Registry 或 `%APPDATA%` / `%LOCALAPPDATA%`，不在 Git 仓库中。不要把真实 `.env`、`.reg`、导出文件或包含敏感参数的配置提交到版本库。
+
+参与开发前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
+
 ## 验证与构建
 
 ```powershell
@@ -93,3 +120,7 @@ pnpm tauri:build
 ```
 
 Windows release 构建生成 MSI 和 NSIS 安装包。发布前还需执行 opt-in 的 live HKCU 测试，以及主窗口、QuickPanel、安装包内容和 release executable 的桌面 smoke test。
+
+## License
+
+EnvManager is released under the [MIT License](LICENSE).

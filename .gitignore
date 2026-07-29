@@ -22,6 +22,10 @@ envmanager-backups/
 envmanager-export*.json
 envmanager-backup*.json
 
+# Local specifications and implementation plans
+.fspec/
+docs/plans/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

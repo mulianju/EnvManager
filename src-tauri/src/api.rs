@@ -343,6 +343,50 @@ pub fn save_command_shim(
 }
 
 #[tauri::command]
+pub fn repair_command_shims(state: State<'_, AppState>) -> Result<CommandShimSnapshot, ApiError> {
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        return Err(ApiError::from(CommandShimError::UnsupportedPlatform));
+    }
+    #[cfg(windows)]
+    {
+        state.command_shims.transaction(|| {
+            let service = lock_service(&state)?;
+            let path_mutation = service
+                .ensure_user_path_entry_transactional(state.command_shims.managed_directory())
+                .map_err(ApiError::from)?;
+            let repair_result = service
+                .effective_path_entries()
+                .map_err(ApiError::from)
+                .and_then(|search_path| {
+                    state
+                        .command_shims
+                        .repair_with_path(true, &search_path)
+                        .map_err(ApiError::from)
+                });
+            match repair_result {
+                Ok(snapshot) => Ok(snapshot),
+                Err(error) => {
+                    if let Some(mutation) = path_mutation
+                        && let Err(rollback_error) = service.rollback_user_path_entry(mutation)
+                    {
+                        return Err(ApiError::new(
+                            "shimOperationFailed",
+                            format!(
+                                "{} User Path rollback also failed: {rollback_error}",
+                                error.message
+                            ),
+                        ));
+                    }
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
+#[tauri::command]
 pub fn delete_command_shim(
     id: String,
     state: State<'_, AppState>,

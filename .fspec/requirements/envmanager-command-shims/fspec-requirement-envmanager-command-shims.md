@@ -12,9 +12,9 @@
 | 来源链接 | 当前 Codex 会话 |
 | 优先级 | 待确认 |
 | 产品版本 | 待确认 |
-| 状态 | 已发布 |
+| 状态 | v0.2.1 本机已验证，待发布 |
 | 创建日期 | 2026-07-22 |
-| 最后更新 | 2026-07-28 |
+| 最后更新 | 2026-07-29 |
 
 ## 阶段文档引用
 
@@ -25,12 +25,13 @@
 | 开发 | 实现代码与提交 diff | 已完成 | 2026-07-28 |
 | 测试 | [test-command-shims.md](test/test-command-shims.md) | 已完成 | 2026-07-28 |
 | 上线 | [release-command-shims.md](release/release-command-shims.md) | 已发布 | 2026-07-29 |
+| Bugfix | [bugfix-shell-access-repair.md](bugfix/bugfix-shell-access-repair.md) | 已验证 | 2026-07-29 |
 
 ## 当前进度
 
-- **当前阶段**：已发布
+- **当前阶段**：v0.2.1 Shell 访问修复已在本机验证，待发布
 - **当前结论**：首期采用通用 executable + fixed arguments、仅 User scope，同时生成 PowerShell/CMD 与 Git Bash wrapper
-- **下一步行动**：收集公开反馈并按需安排后续版本
+- **下一步行动**：提交并发布 `v0.2.1`
 
 ## 原始输入与来源摘要
 
@@ -101,3 +102,5 @@ sharedev -> C:\Tools\Node\node.exe
 | v0.3 | 2026-07-28 | 补充 Git Bash wrapper 与开源发布验收范围 | Codex |
 | v0.4 | 2026-07-28 | 完成全量验证并进入开源发布 | Codex |
 | v0.5 | 2026-07-29 | 发布 GitHub 仓库、v0.2.0 tag 与安装包 | Codex |
+| v0.6 | 2026-07-29 | 记录旧安装残留导致 User Path 与 Git Bash wrapper 缺失的修复范围 | Codex |
+| v0.7 | 2026-07-29 | 完成显式 Repair、回归验证与 v0.2.1 本地安装包 | Codex |

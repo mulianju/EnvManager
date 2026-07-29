@@ -140,6 +140,19 @@ export async function saveCommandShim(
   return invoke<CommandShimSnapshot>("save_command_shim", { input });
 }
 
+export async function repairCommandShims(): Promise<CommandShimSnapshot> {
+  if (browserPreview) {
+    previewCommandShims.pathReady = true;
+    previewCommandShims.items = previewCommandShims.items.map((item) =>
+      item.status === "missingShim"
+        ? { ...item, status: "ready", statusMessage: null }
+        : item,
+    );
+    return structuredClone(previewCommandShims);
+  }
+  return invoke<CommandShimSnapshot>("repair_command_shims");
+}
+
 export async function deleteCommandShim(id: string): Promise<CommandShimSnapshot> {
   if (browserPreview) {
     if (!previewCommandShims.items.some((item) => item.id === id)) {

@@ -252,11 +252,13 @@ describe("browser preview API contracts", () => {
 
     await api.getCommandShims();
     await api.saveCommandShim(input);
+    await api.repairCommandShims();
     await api.deleteCommandShim("shim-id");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "get_command_shims");
     expect(invoke).toHaveBeenNthCalledWith(2, "save_command_shim", { input });
-    expect(invoke).toHaveBeenNthCalledWith(3, "delete_command_shim", { id: "shim-id" });
+    expect(invoke).toHaveBeenNthCalledWith(3, "repair_command_shims");
+    expect(invoke).toHaveBeenNthCalledWith(4, "delete_command_shim", { id: "shim-id" });
   });
 
   it("opens the native folder picker with a single-directory payload and preserves cancellation", async () => {

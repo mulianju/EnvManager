@@ -18,6 +18,7 @@ const COMMANDS: &[&str] = &[
     "restart_elevated",
     "get_command_shims",
     "save_command_shim",
+    "repair_command_shims",
     "delete_command_shim",
 ];
 

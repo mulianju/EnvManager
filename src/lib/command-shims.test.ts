@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CommandShim, CommandShimInput } from "../types";
 import {
+  commandShimAccessNeedsRepair,
   commandPreviewParts,
   commandShimStatusLabel,
   filterCommandShims,
@@ -59,5 +60,24 @@ describe("Command Shim workflow", () => {
     expect(commandShimStatusLabel("ready")).toBe("Ready");
     expect(commandShimStatusLabel("externallyModified")).toBe("Externally modified");
     expect(commandShimStatusLabel("missingShim")).toBe("Missing shim");
+  });
+
+  it("offers shell repair only when PATH or a managed wrapper is missing", () => {
+    const snapshot = {
+      items,
+      managedDirectory: "C:\\Managed",
+      pathReady: true,
+    };
+    expect(commandShimAccessNeedsRepair(snapshot)).toBe(false);
+    expect(commandShimAccessNeedsRepair({ ...snapshot, items: [], pathReady: false })).toBe(false);
+    expect(commandShimAccessNeedsRepair({ ...snapshot, pathReady: false })).toBe(true);
+    expect(commandShimAccessNeedsRepair({
+      ...snapshot,
+      items: [{ ...items[0], status: "missingShim" }],
+    })).toBe(true);
+    expect(commandShimAccessNeedsRepair({
+      ...snapshot,
+      items: [{ ...items[0], status: "externallyModified" }],
+    })).toBe(false);
   });
 });

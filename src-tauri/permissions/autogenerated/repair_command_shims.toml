@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-repair-command-shims"
+description = "Enables the repair_command_shims command without any pre-configured scope."
+commands.allow = ["repair_command_shims"]
+
+[[permission]]
+identifier = "deny-repair-command-shims"
+description = "Denies the repair_command_shims command without any pre-configured scope."
+commands.deny = ["repair_command_shims"]

@@ -47,6 +47,7 @@ pub fn run() {
             api::restart_elevated,
             api::get_command_shims,
             api::save_command_shim,
+            api::repair_command_shims,
             api::delete_command_shim,
         ]);
 

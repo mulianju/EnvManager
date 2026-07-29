@@ -1,4 +1,9 @@
-import type { CommandShim, CommandShimInput, CommandShimStatus } from "../types";
+import type {
+  CommandShim,
+  CommandShimInput,
+  CommandShimSnapshot,
+  CommandShimStatus,
+} from "../types";
 
 export interface CommandPreviewPart {
   kind: "executable" | "fixedArgument" | "runtimeArguments";
@@ -34,6 +39,11 @@ export function commandShimStatusLabel(status: CommandShimStatus): string {
     externallyModified: "Externally modified",
     missingShim: "Missing shim",
   }[status];
+}
+
+export function commandShimAccessNeedsRepair(snapshot: CommandShimSnapshot): boolean {
+  return snapshot.items.length > 0
+    && (!snapshot.pathReady || snapshot.items.some((item) => item.status === "missingShim"));
 }
 
 export function emptyCommandShimInput(): CommandShimInput {

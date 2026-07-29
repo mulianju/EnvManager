@@ -59,3 +59,20 @@ Rust Windows 测试 `generated_shell_shim_runs_from_git_bash_path` 通过本机 
 - 未对真实 `sharedev` 进行创建或替换，避免影响用户当前调试工具。
 - Windows PowerShell 5.1 已作为真实测试目标；CMD 是 `.cmd` 解析入口；Git Bash 由真实 `bash.exe` 自动化覆盖。PowerShell 7 与 IDE Terminal 的人工矩阵可在用户创建首个实际 Shim 后继续验证。
 - 尚未通过故障注入逐个触发配置原子写、重命名删除和回滚本身失败的所有分支；这些分支已做代码审查，后续可增加可注入文件系统测试接口。
+
+## v0.2.1 Shell 访问修复回归（2026-07-29）
+
+| 验证项 | 实际结果 |
+|------|------|
+| 缺失 `.cmd` 与 Git Bash wrapper 重建 | 通过 |
+| 仅缺失 Git Bash wrapper 的旧配置修复 | 通过 |
+| Repair 重复执行幂等 | 通过 |
+| 外部 wrapper 拒绝覆盖，本轮已创建文件回滚 | 通过 |
+| User `Path` 事务回滚与并发修改保护 | 通过 |
+| Rust 全量测试 | 126 passed，1 个 live HKCU 测试按设计 ignored |
+| 安全契约 | 4 passed |
+| 前端全量测试 | 9 files、95 tests passed |
+| TypeScript / Vite build / cargo check / cargo fmt --check | 全部退出码 0 |
+| 真实桌面用户 Repair | `Missing shim` 变为 `Ready` |
+| 真实桌面用户 PowerShell 解析 | `%LOCALAPPDATA%\EnvManager\bin\sharedev.cmd` |
+| 真实桌面用户 Git Bash 解析 | `/c/Users/mulia/AppData/Local/EnvManager/bin/sharedev` |

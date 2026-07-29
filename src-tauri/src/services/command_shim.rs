@@ -477,6 +477,28 @@ impl CommandShimStore {
         Ok(self.snapshot_from_document(&document, path_ready, search_path))
     }
 
+    pub fn repair_with_path(
+        &self,
+        path_ready: bool,
+        search_path: &[PathBuf],
+    ) -> Result<CommandShimSnapshot, CommandShimError> {
+        let _write_guard = acquire_command_shim_write_lock()?;
+        let document = self.read_document()?;
+        let mut created_files = Vec::new();
+
+        if !document.items.is_empty() {
+            fs::create_dir_all(&self.managed_directory)?;
+        }
+        for item in &document.items {
+            if let Err(error) = self.repair_item(item, &mut created_files) {
+                let rollback = rollback_created_files(&created_files);
+                return Err(with_rollback(error, rollback));
+            }
+        }
+
+        Ok(self.snapshot_from_document(&document, path_ready, search_path))
+    }
+
     #[cfg(windows)]
     pub fn transaction<T, E>(&self, operation: impl FnOnce() -> Result<T, E>) -> Result<T, E>
     where
@@ -673,6 +695,37 @@ impl CommandShimStore {
         let content = build_shim_content(&item.id, &item.executable, &item.fixed_arguments)?;
         write_bytes_atomically(&self.shim_path(&item.command_name), content.as_bytes())?;
         Ok(())
+    }
+
+    fn repair_item(
+        &self,
+        item: &StoredCommandShim,
+        created_files: &mut Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<(), CommandShimError> {
+        let batch_content =
+            build_shim_content(&item.id, &item.executable, &item.fixed_arguments)?.into_bytes();
+        if content_hash(&batch_content) != item.content_sha256 {
+            return Err(CommandShimError::InvalidDocument(format!(
+                "Stored checksum does not match command {}.",
+                item.command_name
+            )));
+        }
+        repair_owned_file(
+            &self.shim_path(&item.command_name),
+            &batch_content,
+            &format!("{OWNERSHIP_PREFIX}{}", item.id),
+            created_files,
+        )?;
+
+        let shell_content =
+            build_shell_shim_content(&item.id, &item.executable, &item.fixed_arguments)?
+                .into_bytes();
+        repair_owned_file(
+            &self.shell_shim_path(&item.command_name),
+            &shell_content,
+            &format!("{SHELL_OWNERSHIP_PREFIX}{}", item.id),
+            created_files,
+        )
     }
 
     fn restore_after_failed_save(
@@ -1052,6 +1105,43 @@ fn remove_file_if_matches(path: &Path, expected: &[u8]) -> Result<(), CommandShi
     }
 }
 
+fn repair_owned_file(
+    path: &Path,
+    expected: &[u8],
+    ownership: &str,
+    created_files: &mut Vec<(PathBuf, Vec<u8>)>,
+) -> Result<(), CommandShimError> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let has_ownership = String::from_utf8_lossy(&bytes)
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case(ownership));
+            if !has_ownership || bytes != expected {
+                return Err(CommandShimError::ExternallyModified(path.to_owned()));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            write_bytes_atomically(path, expected)?;
+            created_files.push((path.to_owned(), expected.to_vec()));
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn rollback_created_files(files: &[(PathBuf, Vec<u8>)]) -> Result<(), CommandShimError> {
+    let mut first_error = None;
+    for (path, content) in files.iter().rev() {
+        if let Err(error) = remove_file_if_matches(path, content)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 fn with_rollback(
     error: CommandShimError,
     rollback: Result<(), CommandShimError>,
@@ -1340,6 +1430,44 @@ mod tests {
             b"#!/usr/bin/env bash\necho external\n"
         );
         assert!(!harness.store.shim_path("sharedev").exists());
+    }
+
+    #[test]
+    fn repair_recreates_missing_owned_wrappers_and_is_idempotent() {
+        let harness = Harness::new();
+        harness.store.save(harness.input("sharedev")).unwrap();
+        let item = harness.store.snapshot(true).unwrap().items.remove(0);
+        let shell_path = harness.store.shell_shim_path("sharedev");
+        fs::remove_file(&item.shim_path).unwrap();
+        fs::remove_file(&shell_path).unwrap();
+
+        let repaired = harness.store.repair_with_path(true, &[]).unwrap();
+        assert_eq!(repaired.items[0].status, CommandShimStatus::Ready);
+        assert!(item.shim_path.is_file());
+        assert!(shell_path.is_file());
+
+        let repaired_again = harness.store.repair_with_path(true, &[]).unwrap();
+        assert_eq!(repaired_again, repaired);
+    }
+
+    #[test]
+    fn repair_preserves_external_wrapper_and_rolls_back_files_created_in_this_attempt() {
+        let harness = Harness::new();
+        harness.store.save(harness.input("sharedev")).unwrap();
+        let item = harness.store.snapshot(true).unwrap().items.remove(0);
+        let shell_path = harness.store.shell_shim_path("sharedev");
+        fs::remove_file(&item.shim_path).unwrap();
+        fs::write(&shell_path, b"#!/usr/bin/env bash\necho external\n").unwrap();
+
+        assert!(matches!(
+            harness.store.repair_with_path(true, &[]),
+            Err(CommandShimError::ExternallyModified(path)) if path == shell_path
+        ));
+        assert!(!item.shim_path.exists());
+        assert_eq!(
+            fs::read(&shell_path).unwrap(),
+            b"#!/usr/bin/env bash\necho external\n"
+        );
     }
 
     #[test]

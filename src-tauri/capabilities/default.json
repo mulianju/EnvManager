@@ -26,6 +26,7 @@
     "allow-restart-elevated",
     "allow-get-command-shims",
     "allow-save-command-shim",
+    "allow-repair-command-shims",
     "allow-delete-command-shim"
   ]
 }

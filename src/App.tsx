@@ -45,6 +45,7 @@ import {
   getEnvironmentSnapshot,
   getFavorites,
   getCommandShims,
+  repairCommandShims,
   restartElevated,
   restoreEnvironmentBackup,
   saveEnvironmentVariable,
@@ -434,6 +435,15 @@ function App() {
     setNotice({ message: `${input.commandName} deleted. Its executable and fixed argument files were not changed.` });
   };
 
+  const repairShellAccess = async () => {
+    const next = await perform(() => repairCommandShims());
+    if (!next) return;
+    setCommandShimSnapshot(next);
+    setNotice({
+      message: "Shell access repaired. Fully quit and reopen your terminal or IDE before using these commands.",
+    });
+  };
+
   const undoMutation = async (backupIds: string[], expectedRevision: string) => {
     const next = await perform(() =>
       undoEnvironmentMutation(backupIds, expectedRevision),
@@ -709,6 +719,7 @@ function App() {
                   busy={busy}
                   items={commandShims}
                   onEdit={openCommandShim}
+                  onRepair={() => void repairShellAccess()}
                   query={query}
                   snapshot={commandShimSnapshot}
                 />

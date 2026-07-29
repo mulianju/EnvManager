@@ -33,3 +33,12 @@ GitHub Release 返回的 asset digest 与本地 SHA-256 一致，两个附件状
 - 源码回退到 `v0.1.0` 可移除 Command Shims 功能。
 - 已生成的受管 Shim 和 `%APPDATA%\EnvManager\command-shims.json` 需按所有权标识确认后删除。
 - User `PATH` 中 `%LOCALAPPDATA%\EnvManager\bin` 默认保留，需移除时通过 EnvManager 的 User Path 编辑器操作。
+
+## v0.2.1 本地发布候选
+
+`v0.2.1` 修复旧安装残留导致 User `PATH` 或 Git Bash wrapper 缺失的问题。当前已完成本地构建和本机原位安装，尚未发布到 GitHub。
+
+| 文件 | 大小 | SHA-256 |
+|------|------|---------|
+| `EnvManager_0.2.1_x64_en-US.msi` | 3,649,536 bytes | `B967F78092DD89077EFF1AD0A4366FF017671EE20ADD4755597AF787CD4E66BA` |
+| `EnvManager_0.2.1_x64-setup.exe` | 2,460,690 bytes | `F83F27116B33429567A85F29FA627110C0BE6CAFAA2E129F0DF84CFBD23CC298` |

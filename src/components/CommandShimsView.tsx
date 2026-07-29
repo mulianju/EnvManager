@@ -1,5 +1,8 @@
-import { AlertTriangle, CheckCircle2, Pencil, Terminal } from "lucide-react";
-import { commandShimStatusLabel } from "../lib/command-shims";
+import { AlertTriangle, CheckCircle2, Pencil, Terminal, Wrench } from "lucide-react";
+import {
+  commandShimAccessNeedsRepair,
+  commandShimStatusLabel,
+} from "../lib/command-shims";
 import type { CommandShim, CommandShimSnapshot } from "../types";
 import { TablePagination, useTablePagination } from "./TablePagination";
 
@@ -9,22 +12,35 @@ export function CommandShimsView({
   query,
   busy,
   onEdit,
+  onRepair,
 }: {
   snapshot: CommandShimSnapshot;
   items: CommandShim[];
   query: string;
   busy: boolean;
   onEdit: (item: CommandShim) => void;
+  onRepair: () => void;
 }) {
   const pagination = useTablePagination(items, `command-shims:${query}`);
+  const needsRepair = commandShimAccessNeedsRepair(snapshot);
+  const accessMessage = !snapshot.pathReady
+    ? "Missing from User PATH"
+    : needsRepair
+      ? "One or more managed wrappers are missing"
+      : "Available in User PATH";
   return (
     <section className="content-section command-shims-section">
-      <div className={snapshot.pathReady ? "shim-directory ready" : "shim-directory warning"}>
-        {snapshot.pathReady ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+      <div className={needsRepair ? "shim-directory warning" : "shim-directory ready"}>
+        {needsRepair ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}
         <div>
           <code>{snapshot.managedDirectory}</code>
-          <span>{snapshot.pathReady ? "Available in User PATH" : "Added to User PATH on first save"}</span>
+          <span>{accessMessage}</span>
         </div>
+        {needsRepair && (
+          <button className="secondary-button compact-button" disabled={busy} onClick={onRepair} type="button">
+            <Wrench size={14} /> Repair shell access
+          </button>
+        )}
       </div>
       <div className="table-shell">
         <div className="command-shim-table">

@@ -12,7 +12,7 @@
 | 来源链接 | 当前 Codex 会话 |
 | 优先级 | 待确认 |
 | 产品版本 | 待确认 |
-| 状态 | 已验证 |
+| 状态 | 已发布 |
 | 创建日期 | 2026-07-22 |
 | 最后更新 | 2026-07-28 |
 
@@ -24,13 +24,13 @@
 | 实施计划 | [plan.md](../../fe/deliverables/2026-07-28-command-shims/plan.md) | 已完成 | 2026-07-28 |
 | 开发 | 实现代码与提交 diff | 已完成 | 2026-07-28 |
 | 测试 | [test-command-shims.md](test/test-command-shims.md) | 已完成 | 2026-07-28 |
-| 上线 | `release/release-command-shims.md` | 待开始 | - |
+| 上线 | [release-command-shims.md](release/release-command-shims.md) | 已发布 | 2026-07-29 |
 
 ## 当前进度
 
-- **当前阶段**：发布准备
+- **当前阶段**：已发布
 - **当前结论**：首期采用通用 executable + fixed arguments、仅 User scope，同时生成 PowerShell/CMD 与 Git Bash wrapper
-- **下一步行动**：生成最终安装包并完成 GitHub 开源发布
+- **下一步行动**：收集公开反馈并按需安排后续版本
 
 ## 原始输入与来源摘要
 
@@ -100,3 +100,4 @@ sharedev -> C:\Tools\Node\node.exe
 | v0.2 | 2026-07-28 | 确认首期范围并进入开发 | Codex |
 | v0.3 | 2026-07-28 | 补充 Git Bash wrapper 与开源发布验收范围 | Codex |
 | v0.4 | 2026-07-28 | 完成全量验证并进入开源发布 | Codex |
+| v0.5 | 2026-07-29 | 发布 GitHub 仓库、v0.2.0 tag 与安装包 | Codex |
